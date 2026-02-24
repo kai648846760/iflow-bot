@@ -96,15 +96,20 @@ def save_config(config) -> None:
 # ============================================================================
 
 def init_workspace(workspace: Path) -> None:
-    """初始化 workspace 目录，从模板目录复制文件。"""
+    """初始化 workspace 目录，从模板目录复制文件。
+
+    逻辑：
+    - 如果 workspace 已存在 AGENTS.md 或 BOOT.md，说明已初始化，跳过模板复制
+    - 只有全新的 workspace 才复制所有模板（包括 BOOTSTRAP.md）
+    """
     # 展开波浪号路径
     workspace = Path(str(workspace).replace("~", str(Path.home())))
     workspace.mkdir(parents=True, exist_ok=True)
-    
+
     # 创建 .iflow 目录
     iflow_dir = workspace / ".iflow"
     iflow_dir.mkdir(exist_ok=True)
-    
+
     # 创建 .iflow/settings.json
     settings_path = iflow_dir / "settings.json"
     if not settings_path.exists():
@@ -116,14 +121,22 @@ def init_workspace(workspace: Path) -> None:
         with open(settings_path, "w", encoding="utf-8") as f:
             json.dump(default_settings, f, indent=2, ensure_ascii=False)
         console.print(f"[green]✓[/green] Created {settings_path}")
-    
-    # 从模板目录复制文件
+
+    # 检查 workspace 是否已经初始化（通过检查核心文件是否存在）
+    core_files = ["AGENTS.md", "BOOT.md", "SOUL.md"]
+    is_initialized = any((workspace / f).exists() for f in core_files)
+
+    if is_initialized:
+        console.print(f"[dim]Workspace already initialized, skipping template copy[/dim]")
+        return
+
+    # 从模板目录复制文件（仅首次初始化）
     templates_dir = get_templates_dir()
-    
+
     # 需要复制的模板文件
     template_files = [
         "AGENTS.md",
-        "BOOT.md", 
+        "BOOT.md",
         "BOOTSTRAP.md",
         "HEARTBEAT.md",
         "IDENTITY.md",
@@ -131,18 +144,18 @@ def init_workspace(workspace: Path) -> None:
         "TOOLS.md",
         "USER.md",
     ]
-    
+
     for filename in template_files:
         src = templates_dir / filename
         dst = workspace / filename
         if src.exists() and not dst.exists():
             shutil.copy2(src, dst)
             console.print(f"[green]✓[/green] Created {dst}")
-    
+
     # 创建 memory 目录并复制 MEMORY.md
     memory_dir = workspace / "memory"
     memory_dir.mkdir(exist_ok=True)
-    
+
     memory_src = templates_dir / "memory" / "MEMORY.md"
     memory_dst = memory_dir / "MEMORY.md"
     if memory_src.exists() and not memory_dst.exists():
