@@ -1,0 +1,190 @@
+"""Agent Loop - 核心消息处理循环。
+
+BOOTSTRAP 引导机制：
+- 每次处理消息前检查 workspace/BOOTSTRAP.md 是否存在
+- 如果存在，将内容作为系统前缀注入到消息中
+- AI 会自动执行引导流程
+- 引导完成后 AI 会删除 BOOTSTRAP.md
+"""
+
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+from typing import Optional
+
+from loguru import logger
+
+from iflow_bot.bus import MessageBus, InboundMessage, OutboundMessage
+from iflow_bot.engine.adapter import IFlowAdapter
+
+
+class AgentLoop:
+    """Agent 主循环 - 处理来自各渠道的消息。
+
+    工作流程:
+    1. 检查 BOOTSTRAP.md 是否存在（首次启动引导）
+    2. 从消息总线获取入站消息
+    3. 通过 SessionMappingManager 获取/创建会话 ID
+    4. 调用 IFlowAdapter 发送消息到 iflow
+    5. 将响应发布到消息总线
+    """
+
+    def __init__(
+        self,
+        bus: MessageBus,
+        adapter: IFlowAdapter,
+        model: str = "glm-5",
+    ):
+        self.bus = bus
+        self.adapter = adapter
+        self.model = model
+        self.workspace = adapter.workspace
+
+        self._running = False
+        self._task: Optional[asyncio.Task] = None
+        self._bootstrap_checked: set[str] = set()  # 记录已检查过 bootstrap 的 channel:chat_id
+
+        logger.info(f"AgentLoop initialized with model={model}, workspace={self.workspace}")
+
+    def _get_bootstrap_content(self) -> Optional[str]:
+        """读取 BOOTSTRAP.md 内容。"""
+        bootstrap_file = self.workspace / "BOOTSTRAP.md"
+        if bootstrap_file.exists():
+            try:
+                content = bootstrap_file.read_text(encoding="utf-8")
+                logger.info("BOOTSTRAP.md detected - will inject bootstrap instructions")
+                return content
+            except Exception as e:
+                logger.error(f"Error reading BOOTSTRAP.md: {e}")
+        return None
+
+    def _inject_bootstrap(self, message: str, bootstrap_content: str) -> str:
+        """将 BOOTSTRAP 内容注入到消息中。
+        
+        格式：
+        [BOOTSTRAP - 首次启动引导 - 必须执行]
+        {bootstrap_content}
+        [/BOOTSTRAP]
+        
+        用户消息: {message}
+        """
+        return f"""[BOOTSTRAP - 首次启动引导 - 必须执行]
+以下是首次启动引导文件，你必须按照其中的指示完成身份设置。
+完成引导后，请删除 workspace/BOOTSTRAP.md 文件。
+
+{bootstrap_content}
+[/BOOTSTRAP]
+
+用户消息: {message}"""
+
+    async def run(self) -> None:
+        """启动主循环。"""
+        self._running = True
+        logger.info("AgentLoop started, listening for inbound messages...")
+
+        while self._running:
+            try:
+                msg = await self.bus.consume_inbound()
+                # 异步处理消息
+                asyncio.create_task(self._process_message(msg))
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Error in main loop: {e}")
+                await asyncio.sleep(0.1)
+
+    async def _process_message(self, msg: InboundMessage) -> None:
+        """处理单条消息。"""
+        try:
+            logger.info(f"Processing: {msg.channel}:{msg.chat_id}")
+
+            # 检查是否是新会话请求（如 /new 命令）
+            if msg.content.strip().lower() in ["/new", "/start"]:
+                # 清除会话映射，开始新对话
+                self.adapter.session_mappings.clear_session(msg.channel, msg.chat_id)
+                # 从 bootstrap 检查列表中移除
+                self._bootstrap_checked.discard(f"{msg.channel}:{msg.chat_id}")
+                await self.bus.publish_outbound(OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content="✨ 已开始新对话，之前的上下文已清除。",
+                ))
+                return
+
+            # 准备消息内容
+            message_content = msg.content
+            
+            # 检查 BOOTSTRAP.md 是否存在
+            bootstrap_content = self._get_bootstrap_content()
+            session_key = f"{msg.channel}:{msg.chat_id}"
+            
+            # 如果 BOOTSTRAP.md 存在且这个用户还没有被引导过
+            if bootstrap_content and session_key not in self._bootstrap_checked:
+                # 注入 bootstrap 内容
+                message_content = self._inject_bootstrap(msg.content, bootstrap_content)
+                self._bootstrap_checked.add(session_key)
+                logger.info(f"Injected BOOTSTRAP for {session_key}")
+
+            # 调用 iflow
+            response = await self.adapter.chat(
+                message=message_content,
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                model=self.model,
+            )
+
+            # 发送响应
+            if response:
+                await self.bus.publish_outbound(OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=response,
+                    metadata={"reply_to_id": msg.metadata.get("message_id")},
+                ))
+                logger.info(f"Response sent to {msg.channel}:{msg.chat_id}")
+
+        except Exception as e:
+            logger.error(f"Error processing message: {e}")
+            await self.bus.publish_outbound(OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=f"❌ 处理消息时出错: {e}",
+            ))
+
+    async def process_direct(
+        self,
+        message: str,
+        channel: str = "cli",
+        chat_id: str = "direct",
+    ) -> str:
+        """直接处理消息（CLI 模式）。"""
+        # 检查 BOOTSTRAP
+        bootstrap_content = self._get_bootstrap_content()
+        session_key = f"{channel}:{chat_id}"
+        
+        message_content = message
+        if bootstrap_content and session_key not in self._bootstrap_checked:
+            message_content = self._inject_bootstrap(message, bootstrap_content)
+            self._bootstrap_checked.add(session_key)
+            logger.info(f"Injected BOOTSTRAP for {session_key} (direct mode)")
+        
+        return await self.adapter.chat(
+            message=message_content,
+            channel=channel,
+            chat_id=chat_id,
+            model=self.model,
+        )
+
+    async def start_background(self) -> None:
+        """后台启动。"""
+        if self._task is None or self._task.done():
+            self._task = asyncio.create_task(self.run())
+            logger.info("AgentLoop started in background")
+
+    def stop(self) -> None:
+        """停止。"""
+        self._running = False
+        if self._task and not self._task.done():
+            self._task.cancel()
+        logger.info("AgentLoop stopped")
