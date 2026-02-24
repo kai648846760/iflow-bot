@@ -3,6 +3,7 @@
 参考: https://platform.iflow.cn/cli/configuration/settings
 """
 
+from pathlib import Path
 from typing import Any, Literal, Optional
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings
@@ -150,59 +151,55 @@ class DriverConfig(BaseModel):
 # ============================================================================
 
 class Config(BaseSettings):
-    """iflow-bot 主配置。"""
-    
+    """iflow-bot 主配置。
+
+    配置统一放在 driver 下，避免重复字段。
+    """
+
     model_config = {
         "env_prefix": "IFLOW_BOT_",
         "env_nested_delimiter": "__",
         "extra": "ignore",
     }
-    
-    # 默认模型
-    model: str = "glm-5"
-    
-    # workspace 路径（可被 driver.workspace 覆盖）
-    workspace_path: str = ""
-    
-    # Driver 配置
+
+    # Driver 配置（包含 model, workspace, timeout 等）
     driver: DriverConfig = Field(default_factory=DriverConfig)
-    
+
     # 渠道配置
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
-    
+
     # 日志
     log_level: str = "INFO"
     log_file: str = ""
-    
+
     def get_enabled_channels(self) -> list[str]:
         """获取已启用的渠道列表。"""
         enabled = []
-        for name in ["telegram", "discord", "whatsapp", "feishu", "slack", 
+        for name in ["telegram", "discord", "whatsapp", "feishu", "slack",
                      "dingtalk", "qq", "email", "mochat"]:
             channel = getattr(self.channels, name, None)
             if channel and getattr(channel, "enabled", False):
                 enabled.append(name)
         return enabled
-    
+
     def get_workspace(self) -> str:
         """获取 workspace 路径。
-        
-        优先级: driver.workspace > workspace_path > 默认 ~/.iflow-bot/workspace
+
+        优先使用 driver.workspace，默认为 ~/.iflow-bot/workspace
         """
         if self.driver and self.driver.workspace:
             return self.driver.workspace
-        if self.workspace_path:
-            return self.workspace_path
-        return ""
-    
+        return str(Path.home() / ".iflow-bot" / "workspace")
+
     def get_model(self) -> str:
-        """获取模型名称。"""
-        if self.model:
-            return self.model
+        """获取模型名称。
+
+        优先使用 driver.model，默认为 glm-5
+        """
         if self.driver and self.driver.model:
             return self.driver.model
         return "glm-5"
-    
+
     def get_timeout(self) -> int:
         """获取超时时间。"""
         if self.driver and self.driver.timeout:

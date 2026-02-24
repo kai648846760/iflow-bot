@@ -158,6 +158,92 @@ You are free to edit `HEARTBEAT.md` with a short checklist or reminders. Keep it
 - One-shot reminders ("remind me in 20 minutes")
 - Output should deliver directly to a channel without main session involvement
 
+**⏰ Scheduled Tasks (Cron)**
+
+When user asks for a reminder or scheduled task, use `exec` tool:
+
+```bash
+iflow-bot cron add --name "reminder" --message "Your message" --at "YYYY-MM-DDTHH:MM:SS" --deliver --channel CHANNEL --to CHAT_ID
+```
+
+Get `CHANNEL` and `CHAT_ID` from `[message_source]` context (e.g., `telegram` and `123456789` from `session: telegram:123456789`).
+
+**⚠️ MUST include `--deliver --channel CHANNEL --to CHAT_ID` for notifications!**
+**⚠️ SERIAL EXECUTION REQUIRED:** When adding multiple cron tasks, you MUST execute them **one at a time, sequentially**. Do NOT batch multiple `iflow-bot cron add` commands in a single call. Add one task, wait for confirmation, then add the next.
+
+**Task Types:**
+- **One-time**: `--at "2026-02-25T15:00:00"` (ISO format)
+- **Interval**: `--every 300` (seconds)
+- **Cron**: `--cron "0 9 * * *" --tz "Asia/Shanghai"`
+
+**Silent Tasks (no notification):**
+Only use `--silent` flag when user explicitly requests NO notification:
+```bash
+iflow-bot cron add --name "background task" --message "process data" --every 3600 --silent
+```
+
+**Commands:**
+```bash
+iflow-bot cron list              # List tasks
+iflow-bot cron add               # Add task
+iflow-bot cron remove <id>       # Remove task
+iflow-bot cron enable <id>       # Enable task
+iflow-bot cron disable <id>      # Disable task
+iflow-bot cron run <id>          # Run immediately
+```
+
+**Cron Expression Format:**
+```
+┌───────────── minute (0-59)
+│ ┌───────────── hour (0-23)
+│ │ ┌───────────── day (1-31)
+│ │ │ ┌───────────── month (1-12)
+│ │ │ │ ┌───────────── weekday (0-6, 0=Sunday)
+│ │ │ │ │
+* * * * *
+```
+
+**Common Patterns:**
+| Expression | Description |
+|------------|-------------|
+| `0 9 * * *` | Every day at 9:00 |
+| `0 9 * * 1-5` | Weekdays at 9:00 |
+| `0 9 * * 1` | Every Monday at 9:00 |
+| `*/15 * * * *` | Every 15 minutes |
+| `0 0 1 * *` | First day of month |
+
+**⚠️ Important: By default, tasks MUST deliver to the user's channel! Unless user explicitly requests NO delivery**
+
+```bash
+# Daily at 9 AM
+iflow-bot cron add --name "morning_greeting" --message "Good morning! New day started" --cron "0 9 * * *" --tz "Asia/Shanghai" --deliver --channel telegram --to "123456789"
+
+# Monthly on 1st at 10 AM
+iflow-bot cron add --name "monthly_task" --message "New month started" --cron "0 10 1 * *" --tz "Asia/Shanghai" --deliver --channel telegram --to "123456789"
+
+# Every 15 minutes
+iflow-bot cron add --name "frequent_task" --message "Running every 15 minutes" --cron "*/15 * * * *" --tz "Asia/Shanghai" --deliver --channel telegram --to "123456789"
+```
+
+**Delivering to Channels:**
+
+```bash
+# Send to Telegram
+iflow-bot cron add --name "scheduled_notification" --message "This is the scheduled content" --every 3600 --deliver --channel telegram --to "123456789"
+
+# Send to Discord
+iflow-bot cron add --name "discord_reminder" --message "Discord scheduled message" --every 7200 --deliver --channel discord --to "987654321"
+```
+
+**Practical Examples:**
+```bash
+# Weather report (every morning at 7 AM)
+iflow-bot cron add --name "weather_forecast" --message "Check today's weather forecast" --cron "0 7 * * *" --tz "Asia/Shanghai" --deliver --channel telegram --to "123456789"
+
+# Weekly report reminder (every Friday at 5 PM)
+iflow-bot cron add --name "weekly_report" --message "Time to write your weekly report!" --cron "0 17 * * 5" --tz "Asia/Shanghai" --deliver --channel telegram --to "123456789"
+```
+
 **Tip:** Batch similar periodic checks into `HEARTBEAT.md` instead of creating multiple cron jobs. Use cron for precise schedules and standalone tasks.
 
 **Things to check (rotate through these, 2-4 times per day):**

@@ -34,13 +34,14 @@ def get_workspace_path() -> Path:
     return workspace
 
 
-def load_config(config_path: Optional[Path] = None) -> Config:
+def load_config(config_path: Optional[Path] = None, auto_create: bool = True) -> Config:
     """
     Load configuration from file.
     
     Args:
         config_path: Optional path to config file. If not provided,
                      uses the default path.
+        auto_create: If True, create default config file when not exists.
     
     Returns:
         Config object.
@@ -58,9 +59,131 @@ def load_config(config_path: Optional[Path] = None) -> Config:
         except (json.JSONDecodeError, ValidationError) as e:
             logger.warning(f"Invalid config file: {e}. Using defaults.")
     else:
-        logger.info("No config file found. Using defaults.")
+        logger.info("No config file found. Creating default config.")
+        config = Config()
+        if auto_create:
+            # 创建默认配置文件
+            _create_default_config(config_path)
+        return config
     
     return Config()
+
+
+def _create_default_config(config_path: Path) -> None:
+    """创建默认配置文件。"""
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    default_config = {
+        "driver": {
+            "iflow_path": "iflow",
+            "model": "glm-5",
+            "yolo": True,
+            "thinking": False,
+            "max_turns": 40,
+            "timeout": 300,
+            "workspace": str(Path.home() / ".iflow-bot" / "workspace"),
+            "extra_args": []
+        },
+        "channels": {
+            "telegram": {
+                "enabled": False,
+                "token": "",
+                "allow_from": []
+            },
+            "discord": {
+                "enabled": False,
+                "token": "",
+                "allow_from": []
+            },
+            "slack": {
+                "enabled": False,
+                "bot_token": "",
+                "app_token": "",
+                "allow_from": [],
+                "group_policy": "mention",
+                "reply_in_thread": True,
+                "react_emoji": "eyes"
+            },
+            "feishu": {
+                "enabled": False,
+                "app_id": "",
+                "app_secret": "",
+                "encrypt_key": "",
+                "verification_token": "",
+                "allow_from": []
+            },
+            "dingtalk": {
+                "enabled": False,
+                "client_id": "",
+                "client_secret": "",
+                "allow_from": []
+            },
+            "qq": {
+                "enabled": False,
+                "app_id": "",
+                "secret": "",
+                "allow_from": []
+            },
+            "whatsapp": {
+                "enabled": False,
+                "bridge_url": "http://localhost:3001",
+                "bridge_token": "",
+                "allow_from": []
+            },
+            "email": {
+                "enabled": False,
+                "consent_granted": False,
+                "imap_host": "imap.gmail.com",
+                "imap_port": 993,
+                "imap_username": "",
+                "imap_password": "",
+                "imap_use_ssl": True,
+                "smtp_host": "smtp.gmail.com",
+                "smtp_port": 587,
+                "smtp_username": "",
+                "smtp_password": "",
+                "smtp_use_tls": True,
+                "from_address": "",
+                "allow_from": [],
+                "auto_reply_enabled": True,
+                "poll_interval_seconds": 30,
+                "max_body_chars": 10000,
+                "mark_seen": True,
+                "subject_prefix": "Re: "
+            },
+            "mochat": {
+                "enabled": False,
+                "base_url": "https://mochat.io",
+                "socket_url": "https://mochat.io",
+                "socket_path": "/socket.io",
+                "claw_token": "",
+                "agent_user_id": "",
+                "sessions": ["*"],
+                "panels": ["*"],
+                "watch_timeout_ms": 30000,
+                "watch_limit": 50,
+                "refresh_interval_ms": 60000,
+                "reply_delay_mode": "non-mention",
+                "reply_delay_ms": 120000,
+                "socket_connect_timeout_ms": 10000,
+                "socket_reconnect_delay_ms": 1000,
+                "socket_max_reconnect_delay_ms": 5000,
+                "max_retry_attempts": 5,
+                "retry_delay_ms": 5000
+            }
+        },
+        "heartbeat": {
+            "enabled": True,
+            "interval_s": 1800
+        },
+        "log_level": "INFO",
+        "log_file": ""
+    }
+    
+    with open(config_path, "w", encoding="utf-8") as f:
+        json.dump(default_config, f, indent=2, ensure_ascii=False)
+    
+    logger.info(f"Created default config at {config_path}")
 
 
 def save_config(config: Config, config_path: Optional[Path] = None) -> None:
