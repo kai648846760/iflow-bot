@@ -43,7 +43,6 @@ class AgentLoop:
 
         self._running = False
         self._task: Optional[asyncio.Task] = None
-        self._bootstrap_checked: set[str] = set()  # 记录已检查过 bootstrap 的 channel:chat_id
 
         logger.info(f"AgentLoop initialized with model={model}, workspace={self.workspace}")
 
@@ -103,8 +102,6 @@ class AgentLoop:
             if msg.content.strip().lower() in ["/new", "/start"]:
                 # 清除会话映射，开始新对话
                 self.adapter.session_mappings.clear_session(msg.channel, msg.chat_id)
-                # 从 bootstrap 检查列表中移除
-                self._bootstrap_checked.discard(f"{msg.channel}:{msg.chat_id}")
                 await self.bus.publish_outbound(OutboundMessage(
                     channel=msg.channel,
                     chat_id=msg.chat_id,
@@ -115,16 +112,13 @@ class AgentLoop:
             # 准备消息内容
             message_content = msg.content
             
-            # 检查 BOOTSTRAP.md 是否存在
+            # 检查 BOOTSTRAP.md 是否存在（每次都检查文件，不依赖内存状态）
             bootstrap_content = self._get_bootstrap_content()
-            session_key = f"{msg.channel}:{msg.chat_id}"
             
-            # 如果 BOOTSTRAP.md 存在且这个用户还没有被引导过
-            if bootstrap_content and session_key not in self._bootstrap_checked:
-                # 注入 bootstrap 内容
+            # 如果 BOOTSTRAP.md 存在，注入引导内容
+            if bootstrap_content:
                 message_content = self._inject_bootstrap(msg.content, bootstrap_content)
-                self._bootstrap_checked.add(session_key)
-                logger.info(f"Injected BOOTSTRAP for {session_key}")
+                logger.info(f"Injected BOOTSTRAP for {msg.channel}:{msg.chat_id}")
 
             # 调用 iflow
             response = await self.adapter.chat(
@@ -134,7 +128,7 @@ class AgentLoop:
                 model=self.model,
             )
 
-            # 发送响应
+            # 发送最终响应
             if response:
                 await self.bus.publish_outbound(OutboundMessage(
                     channel=msg.channel,
@@ -158,16 +152,20 @@ class AgentLoop:
         channel: str = "cli",
         chat_id: str = "direct",
     ) -> str:
-        """直接处理消息（CLI 模式）。"""
-        # 检查 BOOTSTRAP
+        """直接处理消息（CLI 模式）。
+        
+        Args:
+            message: 消息内容
+            channel: 渠道名称
+            chat_id: 聊天 ID
+        """
+        # 检查 BOOTSTRAP（每次都检查文件是否存在）
         bootstrap_content = self._get_bootstrap_content()
-        session_key = f"{channel}:{chat_id}"
         
         message_content = message
-        if bootstrap_content and session_key not in self._bootstrap_checked:
+        if bootstrap_content:
             message_content = self._inject_bootstrap(message, bootstrap_content)
-            self._bootstrap_checked.add(session_key)
-            logger.info(f"Injected BOOTSTRAP for {session_key} (direct mode)")
+            logger.info(f"Injected BOOTSTRAP for {channel}:{chat_id} (direct mode)")
         
         return await self.adapter.chat(
             message=message_content,
