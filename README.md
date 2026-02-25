@@ -70,6 +70,22 @@ iflow
 
 ### 安装
 
+**方式一：pip 安装（推荐）**
+
+```bash
+pip install iflow-bot
+```
+
+安装完成后即可直接使用：
+
+```bash
+iflow-bot --help
+iflow-bot onboard
+iflow-bot gateway run
+```
+
+**方式二：从源码安装**
+
 ```bash
 # 克隆仓库
 git clone https://github.com/your-repo/iflow-bot.git
@@ -82,15 +98,36 @@ uv sync
 ### 初始化配置
 
 ```bash
-# 创建默认配置文件
+# 创建默认配置文件（pip 安装）
+iflow-bot onboard
+
+# 或源码安装
 uv run iflow-bot onboard
 
-# 或手动创建配置
+# 或手动创建
 mkdir -p ~/.iflow-bot
 cp config.example.json ~/.iflow-bot/config.json
 ```
 
 ### 启动服务
+
+**pip 安装后：**
+
+```bash
+# 前台运行（调试模式）
+iflow-bot gateway run
+
+# 后台运行
+iflow-bot gateway start
+
+# 查看状态
+iflow-bot status
+
+# 停止服务
+iflow-bot gateway stop
+```
+
+**源码安装后：**
 
 ```bash
 # 前台运行（调试模式）
@@ -98,12 +135,6 @@ uv run iflow-bot gateway run
 
 # 后台运行
 uv run iflow-bot gateway start
-
-# 查看状态
-uv run iflow-bot status
-
-# 停止服务
-uv run iflow-bot gateway stop
 ```
 
 ## ⚙️ 配置说明
