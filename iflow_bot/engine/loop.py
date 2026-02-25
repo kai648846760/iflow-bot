@@ -14,6 +14,7 @@ BOOTSTRAP 引导机制：
 from __future__ import annotations
 
 import asyncio
+import random
 from pathlib import Path
 from typing import Optional
 
@@ -25,6 +26,10 @@ from iflow_bot.engine.adapter import IFlowAdapter
 
 # 支持流式输出的渠道列表
 STREAMING_CHANNELS = {"telegram", "discord", "slack"}
+
+# 流式输出缓冲区大小范围（字符数）
+STREAM_BUFFER_MIN = 10
+STREAM_BUFFER_MAX = 25
 
 
 class AgentLoop:
@@ -202,6 +207,8 @@ time: {now}
         """
         流式处理消息并发送实时更新到渠道。
         
+        使用内容缓冲机制，每满 N 个字符推送一次（随机范围）。
+        
         Args:
             msg: 入站消息
             message_content: 准备好的消息内容
@@ -214,30 +221,34 @@ time: {now}
         # 初始化缓冲区
         self._stream_buffers[session_key] = ""
         
-        # 创建消息 ID 用于流式更新
-        stream_message_id = f"stream_{session_key}"
+        # 未发送的字符计数和当前阈值
+        unflushed_count = 0
+        current_threshold = random.randint(STREAM_BUFFER_MIN, STREAM_BUFFER_MAX)
         
         async def on_chunk(channel: str, chat_id: str, chunk_text: str):
-            """处理流式消息块。"""
+            """处理流式消息块，基于内容长度缓冲。"""
+            nonlocal unflushed_count, current_threshold
+            
             key = f"{channel}:{chat_id}"
             
             # 更新缓冲区
             self._stream_buffers[key] = self._stream_buffers.get(key, "") + chunk_text
+            unflushed_count += len(chunk_text)
             
-            # 发送进度消息
-            current_content = self._stream_buffers[key]
-            
-            # 使用特殊的元数据标记这是流式更新
-            await self.bus.publish_outbound(OutboundMessage(
-                channel=channel,
-                chat_id=chat_id,
-                content=current_content,
-                metadata={
-                    "_progress": True,
-                    "_streaming": True,
-                    "reply_to_id": msg.metadata.get("message_id"),
-                },
-            ))
+            # 当累积足够字符时发送更新
+            if unflushed_count >= current_threshold:
+                unflushed_count = 0
+                current_threshold = random.randint(STREAM_BUFFER_MIN, STREAM_BUFFER_MAX)
+                await self.bus.publish_outbound(OutboundMessage(
+                    channel=channel,
+                    chat_id=chat_id,
+                    content=self._stream_buffers[key],
+                    metadata={
+                        "_progress": True,
+                        "_streaming": True,
+                        "reply_to_id": msg.metadata.get("message_id"),
+                    },
+                ))
         
         try:
             # 使用流式 chat
@@ -249,18 +260,28 @@ time: {now}
                 on_chunk=on_chunk,
             )
             
-            # 清理缓冲区
+            # 清理缓冲区并发送最终内容
             final_content = self._stream_buffers.pop(session_key, "")
             
-            # 发送最终响应标记，让渠道知道流式结束
-            # 不再发送内容，因为流式消息已经发送过了
             if final_content:
+                # 先发送最终内容（确保不丢失剩余字符）
                 await self.bus.publish_outbound(OutboundMessage(
                     channel=msg.channel,
                     chat_id=msg.chat_id,
-                    content="",  # 空内容，只是标记结束
+                    content=final_content,
                     metadata={
-                        "_streaming_end": True,  # 标记流式结束
+                        "_progress": True,
+                        "_streaming": True,
+                        "reply_to_id": msg.metadata.get("message_id"),
+                    },
+                ))
+                # 再发送流式结束标记
+                await self.bus.publish_outbound(OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content="",
+                    metadata={
+                        "_streaming_end": True,
                         "reply_to_id": msg.metadata.get("message_id"),
                     },
                 ))

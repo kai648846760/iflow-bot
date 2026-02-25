@@ -9,6 +9,7 @@ from loguru import logger
 from telegram import BotCommand, Update, ReplyParameters
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram.request import HTTPXRequest
+from telegram.error import NetworkError, TimedOut
 
 from iflow_bot.bus.events import OutboundMessage
 from iflow_bot.bus.queue import MessageBus
@@ -96,6 +97,34 @@ def _split_message(content: str, max_len: int = 4000) -> list[str]:
     return chunks
 
 
+async def _retry_async(func, *args, max_retries: int = 3, delay: float = 1.0, **kwargs):
+    """Retry async function with exponential backoff on network errors."""
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            return await func(*args, **kwargs)
+        except (NetworkError, TimedOut, ConnectionError, OSError) as e:
+            last_error = e
+            if attempt < max_retries - 1:
+                wait_time = delay * (2 ** attempt)  # exponential backoff
+                logger.warning(f"Network error (attempt {attempt + 1}/{max_retries}), retrying in {wait_time}s: {e}")
+                await asyncio.sleep(wait_time)
+            else:
+                logger.error(f"Failed after {max_retries} retries: {e}")
+                raise
+        except Exception as e:
+            # For non-network errors, check if it's a connection issue
+            if "disconnected" in str(e).lower() or "connection" in str(e).lower():
+                last_error = e
+                if attempt < max_retries - 1:
+                    wait_time = delay * (2 ** attempt)
+                    logger.warning(f"Connection error (attempt {attempt + 1}/{max_retries}), retrying in {wait_time}s: {e}")
+                    await asyncio.sleep(wait_time)
+                    continue
+            raise
+    raise last_error
+
+
 @register_channel("telegram")
 class TelegramChannel(BaseChannel):
     """Telegram channel using long polling."""
@@ -114,6 +143,9 @@ class TelegramChannel(BaseChannel):
         self._app: Application | None = None
         self._typing_tasks: dict[str, asyncio.Task] = {}
         self._stream_messages: dict[str, int] = {}  # chat_id -> message_id for streaming
+        self._last_stream_update: dict[str, float] = {}  # chat_id -> timestamp for throttling
+        self._stream_buffer: dict[str, str] = {}  # chat_id -> buffered content
+        self._stream_update_interval: float = 1.5  # Minimum seconds between edits
     
     async def start(self) -> None:
         """Start the Telegram bot with long polling."""
@@ -123,7 +155,14 @@ class TelegramChannel(BaseChannel):
         
         self._running = True
         
-        req = HTTPXRequest(connection_pool_size=16, pool_timeout=5.0)
+        # Increased connection pool and timeouts for better stability
+        req = HTTPXRequest(
+            connection_pool_size=32,
+            pool_timeout=10.0,
+            connect_timeout=30.0,
+            read_timeout=60.0,
+            write_timeout=60.0,
+        )
         self._app = Application.builder().token(self.config.token).request(req).get_updates_request(req).build()
         self._app.add_error_handler(self._on_error)
         
@@ -165,6 +204,8 @@ class TelegramChannel(BaseChannel):
             self._stop_typing(chat_id)
         
         self._stream_messages.clear()
+        self._last_stream_update.clear()
+        self._stream_buffer.clear()
         
         if self._app:
             logger.info("Stopping Telegram bot...")
@@ -190,7 +231,13 @@ class TelegramChannel(BaseChannel):
         
         # Handle streaming end - just clear state, don't send duplicate message
         if msg.metadata.get("_streaming_end"):
-            self._stream_messages.pop(str(chat_id), None)
+            chat_id_str = str(chat_id)
+            # Send final buffered content if any
+            if self._stream_buffer.get(chat_id_str):
+                await self._flush_stream_buffer(chat_id, chat_id_str)
+            self._stream_messages.pop(chat_id_str, None)
+            self._last_stream_update.pop(chat_id_str, None)
+            self._stream_buffer.pop(chat_id_str, None)
             self._stop_typing(msg.chat_id)
             logger.info(f"Streaming ended for chat {chat_id}")
             return
@@ -221,13 +268,22 @@ class TelegramChannel(BaseChannel):
                 ext = Path(media_path).suffix.lower()
                 if ext in (".jpg", ".jpeg", ".png", ".gif", ".webp"):
                     with open(media_path, 'rb') as f:
-                        await self._app.bot.send_photo(chat_id=chat_id, photo=f, reply_parameters=reply_params)
+                        await _retry_async(
+                            self._app.bot.send_photo,
+                            chat_id=chat_id, photo=f, reply_parameters=reply_params
+                        )
                 elif ext == ".ogg":
                     with open(media_path, 'rb') as f:
-                        await self._app.bot.send_voice(chat_id=chat_id, voice=f, reply_parameters=reply_params)
+                        await _retry_async(
+                            self._app.bot.send_voice,
+                            chat_id=chat_id, voice=f, reply_parameters=reply_params
+                        )
                 else:
                     with open(media_path, 'rb') as f:
-                        await self._app.bot.send_document(chat_id=chat_id, document=f, reply_parameters=reply_params)
+                        await _retry_async(
+                            self._app.bot.send_document,
+                            chat_id=chat_id, document=f, reply_parameters=reply_params
+                        )
             except Exception as e:
                 logger.error("Failed to send media {}: {}", media_path, e)
         
@@ -236,33 +292,27 @@ class TelegramChannel(BaseChannel):
             for chunk in _split_message(msg.content):
                 try:
                     html = _markdown_to_telegram_html(chunk)
-                    await self._app.bot.send_message(
+                    await _retry_async(
+                        self._app.bot.send_message,
                         chat_id=chat_id, text=html, parse_mode="HTML", reply_parameters=reply_params
                     )
                 except Exception as e:
                     logger.warning("HTML parse failed, falling back to plain text: {}", e)
                     try:
-                        await self._app.bot.send_message(
+                        await _retry_async(
+                            self._app.bot.send_message,
                             chat_id=chat_id, text=chunk, reply_parameters=reply_params
                         )
                     except Exception as e2:
                         logger.error("Error sending Telegram message: {}", e2)
     
-    async def _handle_streaming_message(self, chat_id: int, msg: OutboundMessage) -> None:
-        """Handle streaming message updates by editing the same message."""
-        content = msg.content
-        if not content or content == "[empty message]":
-            logger.debug(f"Skipping empty streaming message for chat {chat_id}")
+    async def _flush_stream_buffer(self, chat_id: int, chat_id_str: str) -> None:
+        """Flush the stream buffer and send/update the message."""
+        content = self._stream_buffer.get(chat_id_str, "")
+        if not content:
             return
         
-        chat_id_str = str(chat_id)
-        
-        # Check if we already have a streaming message for this chat
         existing_message_id = self._stream_messages.get(chat_id_str)
-        
-        logger.info(f"Streaming message: chat={chat_id}, existing_msg_id={existing_message_id}, content_len={len(content)}")
-        
-        # Limit content length for Telegram (4000 chars to leave room)
         display_content = content[:4000] if len(content) > 4000 else content
         
         try:
@@ -273,51 +323,41 @@ class TelegramChannel(BaseChannel):
         
         try:
             if existing_message_id:
-                # Edit existing message
-                await self._app.bot.edit_message_text(
+                await _retry_async(
+                    self._app.bot.edit_message_text,
                     chat_id=chat_id,
                     message_id=existing_message_id,
                     text=html,
                     parse_mode="HTML",
                 )
-                logger.info(f"Edited streaming message {existing_message_id} in chat {chat_id}")
+                logger.debug(f"Edited streaming message {existing_message_id} in chat {chat_id}")
             else:
-                # Send new message and store its ID
-                reply_to_id = msg.metadata.get("reply_to_id")
-                reply_params = None
-                if reply_to_id:
-                    reply_params = ReplyParameters(message_id=reply_to_id, allow_sending_without_reply=True)
-                
-                sent_message = await self._app.bot.send_message(
+                sent_message = await _retry_async(
+                    self._app.bot.send_message,
                     chat_id=chat_id,
                     text=html,
                     parse_mode="HTML",
-                    reply_parameters=reply_params,
                 )
                 self._stream_messages[chat_id_str] = sent_message.message_id
                 logger.info(f"Sent new streaming message {sent_message.message_id} to chat {chat_id}")
                 
         except Exception as e:
-            # If edit fails (message too long, etc.), try sending new message
             if "message is not modified" in str(e).lower():
                 return  # Ignore if content is the same
-            logger.debug("Streaming message error, sending new: {}", e)
-            try:
-                reply_to_id = msg.metadata.get("reply_to_id")
-                reply_params = None
-                if reply_to_id:
-                    reply_params = ReplyParameters(message_id=reply_to_id, allow_sending_without_reply=True)
-                
-                sent_message = await self._app.bot.send_message(
-                    chat_id=chat_id,
-                    text=html,
-                    parse_mode="HTML",
-                    reply_parameters=reply_params,
-                )
-                self._stream_messages[chat_id_str] = sent_message.message_id
-                logger.info(f"Sent fallback streaming message {sent_message.message_id} to chat {chat_id}")
-            except Exception as e2:
-                logger.error("Failed to send streaming message: {}", e2)
+            logger.error("Failed to flush stream buffer: {}", e)
+    
+    async def _handle_streaming_message(self, chat_id: int, msg: OutboundMessage) -> None:
+        """Handle streaming message updates by editing the same message."""
+        content = msg.content
+        if not content or content == "[empty message]":
+            logger.debug(f"Skipping empty streaming message for chat {chat_id}")
+            return
+        
+        chat_id_str = str(chat_id)
+        
+        # Update buffer with latest content and flush
+        self._stream_buffer[chat_id_str] = content
+        await self._flush_stream_buffer(chat_id, chat_id_str)
     
     async def _on_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.message or not update.effective_user:
@@ -430,7 +470,13 @@ class TelegramChannel(BaseChannel):
     async def _typing_loop(self, chat_id: str) -> None:
         try:
             while self._app:
-                await self._app.bot.send_chat_action(chat_id=int(chat_id), action="typing")
+                try:
+                    await _retry_async(
+                        self._app.bot.send_chat_action,
+                        chat_id=int(chat_id), action="typing"
+                    )
+                except Exception as e:
+                    logger.debug("Typing action failed: {}", e)
                 await asyncio.sleep(4)
         except asyncio.CancelledError:
             pass
