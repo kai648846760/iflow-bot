@@ -1227,7 +1227,7 @@ def cron_list(
         if job.state.last_status == "error":
             status += " [red](错误)[/red]"
         elif job.state.last_status == "ok":
-            status += " [green](✓)[/red]"
+            status += " [green](✓)[/green]"
         
         table.add_row(job.id, job.name, sched, deliver_info, status, next_run)
     
