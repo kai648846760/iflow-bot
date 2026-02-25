@@ -29,6 +29,16 @@
 - ⚡ **流式输出** - 支持 Telegram、钉钉 AI Card 实时流式输出
 - 🔗 **双模式通信** - 支持 CLI 和 ACP 两种与 iflow 的通信方式
 
+## 🎬 演示
+
+### Telegram 流式输出
+
+![Telegram 流式输出演示](https://github.com/kai648846760/iflow-bot/raw/master/testcase/Lark20260225-200423.gif)
+
+### 钉钉 AI Card 流式输出
+
+![钉钉 AI Card 流式输出演示](https://github.com/kai648846760/iflow-bot/raw/master/testcase/Lark20260225-200437.gif)
+
 ## 📋 前置要求
 
 ### 1. 安装 iflow CLI
