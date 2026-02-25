@@ -716,6 +716,126 @@ class ACPAdapter:
         with open(self._session_map_file, "w", encoding="utf-8") as f:
             json.dump(self._session_map, f, indent=2, ensure_ascii=False)
     
+    def _find_session_file(self, session_id: str) -> Optional[Path]:
+        """查找 session 对话历史文件。
+        
+        Args:
+            session_id: session ID
+        
+        Returns:
+            session 文件路径，如果不存在返回 None
+        """
+        # ACP sessions 存放在 ~/.iflow/acp/sessions/
+        sessions_dir = Path.home() / ".iflow" / "acp" / "sessions"
+        
+        if not sessions_dir.exists():
+            return None
+        
+        # 文件名格式: {session_id}.json
+        session_file = sessions_dir / f"{session_id}.json"
+        if session_file.exists():
+            return session_file
+        
+        return None
+    
+    def _extract_conversation_history(self, session_id: str, max_turns: int = 20) -> Optional[str]:
+        """提取 session 对话历史并格式化成提示词。
+        
+        Args:
+            session_id: session ID
+            max_turns: 最大提取的对话轮次
+        
+        Returns:
+            格式化后的对话历史，如果无法提取返回 None
+        """
+        import datetime
+        
+        session_file = self._find_session_file(session_id)
+        if not session_file:
+            logger.debug(f"Session file not found for: {session_id[:16]}...")
+            return None
+        
+        try:
+            with open(session_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            
+            chat_history = data.get("chatHistory", [])
+            if not chat_history:
+                return None
+            
+            # 获取最近的对话轮次
+            recent_chats = chat_history[-max_turns:] if len(chat_history) > max_turns else chat_history
+            
+            conversations = []
+            for chat in recent_chats:
+                role = chat.get("role")
+                parts = chat.get("parts", [])
+                
+                # 提取文本内容
+                full_text = ""
+                for part in parts:
+                    if isinstance(part, dict):
+                        text = part.get("text", "")
+                        if text:
+                            full_text += text + "\n"
+                
+                if not full_text.strip():
+                    continue
+                
+                # 对于用户消息，提取"用户消息:"之后的实际内容
+                if role == "user":
+                    # 尝试提取用户消息后的实际内容
+                    if "用户消息:" in full_text:
+                        # 取用户消息:之后的内容
+                        idx = full_text.find("用户消息:") + len("用户消息:")
+                        content = full_text[idx:].strip()
+                    else:
+                        # 如果没有"用户消息:"，跳过系统提示
+                        continue
+                    
+                    # 跳过太短或太长的内容
+                    if len(content) < 2 or len(content) > 2000:
+                        continue
+                    
+                    # 获取时间戳
+                    timestamp = chat.get("timestamp") or data.get("createdAt", "")
+                    time_str = ""
+                    if timestamp:
+                        try:
+                            ts = timestamp.replace("Z", "+00:00")
+                            dt = datetime.datetime.fromisoformat(ts.replace("+00:00", ""))
+                            time_str = dt.strftime("%Y-%m-%d %H:%M:%S")
+                        except:
+                            pass
+                    conversations.append(f"{time_str}\n用户：{content}")
+                
+                elif role == "model":
+                    # 对于 model 响应，过滤掉系统提示
+                    content = full_text.strip()
+                    
+                    # 过滤掉太长的内容
+                    if len(content) > 3000:
+                        content = content[:3000] + "..."
+                    
+                    # 跳过包含系统提示的内容
+                    if "<system-reminder>" in content or "[AGENTS - 工作空间指南]" in content:
+                        continue
+                    
+                    if len(content) > 10:
+                        conversations.append(f"我：{content}")
+            
+            if not conversations:
+                return None
+            
+            # 组装对话历史
+            history = "<history_context>\n" + "\n\n".join(conversations) + "\n</history_context>"
+            logger.info(f"Extracted {len(conversations)} conversation turns from session {session_id[:16]}...")
+            return history
+            
+        except Exception as e:
+            logger.warning(f"Failed to extract conversation history: {e}")
+            return None
+    
     async def connect(self) -> None:
         """连接到 ACP 服务器并进行认证。"""
         if self._client is None:
@@ -798,12 +918,17 @@ class ACPAdapter:
             
             return session_id
     
-    async def _invalidate_session(self, key: str) -> None:
-        """使 session 失效并清除映射。"""
-        if key in self._session_map:
-            old_session = self._session_map.pop(key)
+    async def _invalidate_session(self, key: str) -> Optional[str]:
+        """使 session 失效并清除映射。
+        
+        Returns:
+            旧的 session_id，如果不存在返回 None
+        """
+        old_session = self._session_map.pop(key, None)
+        if old_session:
             self._save_session_map()
             logger.info(f"Session invalidated: {key} -> {old_session[:16]}...")
+        return old_session
     
     async def _get_or_create_session_with_retry(
         self,
@@ -855,8 +980,27 @@ class ACPAdapter:
         # 如果 session 失效，自动重建并重试
         if response.error and "Invalid request" in response.error:
             logger.warning(f"Session invalid, recreating: {key}")
-            await self._invalidate_session(key)
+            # 获取旧的 session_id 并提取对话历史
+            old_session_id = await self._invalidate_session(key)
+            history_context = ""
+            if old_session_id:
+                history_context = self._extract_conversation_history(old_session_id) or ""
+            
+            # 创建新 session 并注入历史
             session_id = await self._create_new_session(key, model)
+            
+            # 如果有历史，注入到消息中（放在"用户消息:"之前）
+            if history_context:
+                # 找到"用户消息:"的位置，在其之前插入历史记录
+                user_msg_marker = "用户消息:"
+                if user_msg_marker in message:
+                    idx = message.find(user_msg_marker)
+                    message = message[:idx] + history_context + "\n\n" + message[idx:]
+                else:
+                    # 如果没有找到"用户消息:"标记，放在最前面
+                    message = f"{history_context}\n\n{message}"
+                logger.info(f"Injected conversation history before user message")
+            
             response = await self._client.prompt(
                 session_id=session_id,
                 message=message,
@@ -933,8 +1077,27 @@ class ACPAdapter:
         # 如果 session 失效，自动重建并重试
         if response.error and "Invalid request" in response.error:
             logger.warning(f"Session invalid (stream), recreating: {key}")
-            await self._invalidate_session(key)
+            # 获取旧的 session_id 并提取对话历史
+            old_session_id = await self._invalidate_session(key)
+            history_context = ""
+            if old_session_id:
+                history_context = self._extract_conversation_history(old_session_id) or ""
+            
+            # 创建新 session 并注入历史
             session_id = await self._create_new_session(key, model)
+            
+            # 如果有历史，注入到消息中（放在"用户消息:"之前）
+            if history_context:
+                # 找到"用户消息:"的位置，在其之前插入历史记录
+                user_msg_marker = "用户消息:"
+                if user_msg_marker in message:
+                    idx = message.find(user_msg_marker)
+                    message = message[:idx] + history_context + "\n\n" + message[idx:]
+                else:
+                    # 如果没有找到"用户消息:"标记，放在最前面
+                    message = f"{history_context}\n\n{message}"
+                logger.info(f"Injected conversation history before user message (stream)")
+            
             content_parts.clear()
             response = await self._client.prompt(
                 session_id=session_id,
