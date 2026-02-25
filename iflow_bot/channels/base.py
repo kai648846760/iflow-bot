@@ -88,9 +88,21 @@ class BaseChannel(ABC):
             是否有权限
         """
         allow_list = getattr(self.config, "allow_from", [])
+        
+        # 如果没有配置白名单，允许所有
         if not allow_list:
             return True
-        return str(sender_id) in allow_list
+        
+        sender_str = str(sender_id)
+        # 先直接比较完整 sender_id
+        if sender_str in allow_list:
+            return True
+        # 如果 sender_id 包含 |，遍历拆分后的每个部分检查
+        if "|" in sender_str:
+            for part in sender_str.split("|"):
+                if part and part in allow_list:
+                    return True
+        return False
 
     async def _handle_message(
         self,
