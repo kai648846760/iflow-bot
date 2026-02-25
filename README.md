@@ -33,11 +33,11 @@
 
 ### Telegram 流式输出
 
-![Telegram 流式输出演示](https://github.com/kai648846760/iflow-bot/raw/master/testcase/Lark20260225-200423.gif)
+![Telegram 流式输出演示](https://github.com/kai648846760/iflow-bot/raw/master/testcase/Lark20260225-200437.gif)
 
 ### 钉钉 AI Card 流式输出
 
-![钉钉 AI Card 流式输出演示](https://github.com/kai648846760/iflow-bot/raw/master/testcase/Lark20260225-200437.gif)
+![钉钉 AI Card 流式输出演示](https://github.com/kai648846760/iflow-bot/raw/master/testcase/Lark20260225-200423.gif)
 
 ## 📋 前置要求
 
