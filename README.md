@@ -81,7 +81,7 @@ pip install iflow-bot
 ```bash
 iflow-bot --help
 iflow-bot onboard
-iflow-bot gateway run
+iflow-bot gateway start
 ```
 
 **方式二：从源码安装**
@@ -150,7 +150,7 @@ uv run iflow-bot gateway start
     "acp_port": 8090,
     "acp_host": "localhost",
     "iflow_path": "iflow",
-    "model": "glm-5",
+    "model": "minimax-m2.5", // 默认模型（glm-5、kimi-k2.5、minimax-m2.5 等）
     "yolo": true,
     "thinking": false,
     "max_turns": 40,
@@ -497,6 +497,7 @@ iflow-bot config -e
 # 切换模型
 iflow-bot model glm-5
 iflow-bot model kimi-k2.5
+iflow-bot model minimax-m2.5
 
 # 思考模式
 iflow-bot thinking on
