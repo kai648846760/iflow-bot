@@ -24,6 +24,8 @@
 - 📁 **工作空间** - 每个机器人实例拥有独立的工作空间和记忆系统
 - 🔐 **权限控制** - 支持白名单、提及触发等多种策略
 - 🔄 **思考模式** - 可选启用 AI 思考过程展示
+- ⚡ **流式输出** - 支持 Telegram、钉钉 AI Card 实时流式输出
+- 🔗 **双模式通信** - 支持 CLI 和 ACP 两种与 iflow 的通信方式
 
 ## 📋 前置要求
 
@@ -101,6 +103,9 @@ uv run iflow-bot gateway stop
 ```json
 {
   "driver": {
+    "mode": "acp",
+    "acp_port": 8090,
+    "acp_host": "localhost",
     "iflow_path": "iflow",
     "model": "glm-5",
     "yolo": true,
@@ -140,6 +145,9 @@ uv run iflow-bot gateway stop
       "enabled": false,
       "client_id": "xxx",
       "client_secret": "xxx",
+      "robot_code": "xxx",
+      "card_template_id": "xxx-xxx-xxx",
+      "card_template_key": "content",
       "allow_from": []
     },
     "qq": {
@@ -189,6 +197,9 @@ uv run iflow-bot gateway stop
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
+| `mode` | string | `"acp"` | 通信模式：`cli`（子进程调用）或 `acp`（Agent Communication Protocol） |
+| `acp_port` | int | `8090` | ACP 模式下的端口号 |
+| `acp_host` | string | `"localhost"` | ACP 模式下的主机地址 |
 | `iflow_path` | string | `"iflow"` | iflow CLI 路径【保持默认即可】 |
 | `model` | string | `"glm-5"` | 默认模型（glm-5、kimi-k2.5 等） |
 | `yolo` | bool | `true` | 自动确认模式 |
@@ -197,6 +208,19 @@ uv run iflow-bot gateway stop
 | `timeout` | int | `300` | 超时时间（秒） |
 | `workspace` | string | `~/.iflow-bot/workspace` | 工作空间路径 |
 | `extra_args` | list | `[]` | 额外的 iflow 参数 |
+
+#### 通信模式说明
+
+**ACP 模式（推荐）**：
+- 使用 Agent Communication Protocol 与 iflow 通信
+- 支持实时流式输出，打字机效果
+- Gateway 启动时自动执行 `iflow --experimental-acp --port 8090 --stream`
+- 会话状态持久化，重启后自动恢复
+
+**CLI 模式**：
+- 通过子进程调用 iflow CLI
+- 每次对话独立启动进程
+- 适合简单场景或调试
 
 ### 渠道配置
 
@@ -280,6 +304,9 @@ uv run iflow-bot gateway stop
     "enabled": true,
     "client_id": "xxx",
     "client_secret": "xxx",
+    "robot_code": "xxx",
+    "card_template_id": "xxx-xxx-xxx",
+    "card_template_key": "content",
     "allow_from": []
   }
 }
@@ -288,6 +315,25 @@ uv run iflow-bot gateway stop
 1. 在 [钉钉开放平台](https://open.dingtalk.com/) 创建机器人
 2. 获取 Client ID 和 Client Secret
 3. 启用 Stream Mode（无需公网 IP）
+
+**AI Card 流式输出配置**（可选，实现打字机效果）：
+
+| 参数 | 说明 |
+|------|------|
+| `robot_code` | 机器人代码，群聊时需要配置 |
+| `card_template_id` | AI Card 模板 ID，在钉钉开发者后台创建 |
+| `card_template_key` | 模板内容字段名，默认 `content` |
+
+**创建 AI Card 模板**：
+1. 登录 [钉钉开发者后台](https://open.dingtalk.com/)
+2. 进入「卡片平台」→「卡片模板」
+3. 创建模板，添加一个「文本」类型的字段
+4. 记录模板 ID 和字段名，配置到 `card_template_id` 和 `card_template_key`
+
+**流式输出效果**：
+- 用户发送消息后，机器人立即回复一张空白卡片
+- 卡片内容实时更新，呈现打字机效果
+- 无需等待完整响应，体验更流畅
 
 #### QQ
 
@@ -483,25 +529,69 @@ iflow-bot commands --help
 
 ```
 ~/.iflow-bot/
-├── config.json          # 配置文件
-├── gateway.pid          # PID 文件（后台运行）
-├── gateway.log          # 日志文件
-├── workspace/           # iflow 工作空间
-│   ├── AGENTS.md        # Agent 行为指南
-│   ├── BOOT.md          # 启动配置
-│   ├── SOUL.md          # AI 人格定义
-│   ├── USER.md          # 用户信息
-│   ├── TOOLS.md         # 工具配置
-│   ├── HEARTBEAT.md     # 心跳任务
-│   ├── MEMORY.md        # 长期记忆
-│   └── memory/          # 日常记忆
-│       └── YYYY-MM-DD.md
-├── data/                # 数据目录
-│   └── sessions/        # 会话数据
-└── media/               # 媒体文件缓存
+├── botpy.log                # QQ bot 日志
+├── config.json              # 配置文件
+├── gateway.pid              # PID 文件（后台运行）
+├── gateway.log              # Gateway 日志
+├── session_mappings.json    # Session 会话映射
+├── workspace/               # iflow 工作空间
+│   ├── AGENTS.md            # Agent 行为指南
+│   ├── BOOT.md              # 启动配置
+│   ├── HEARTBEAT.md         # 心跳任务
+│   ├── IDENTITY.md          # 身份标识
+│   ├── SOUL.md              # AI 人格定义
+│   ├── TOOLS.md             # 工具配置
+│   ├── USER.md              # 用户信息
+│   └── memory/              # 记忆目录
+│       └── MEMORY.md        # 长期记忆
+└── data/                    # 数据目录
+    └── cron/                # 定时任务
+        └── jobs.json        # 任务数据
 ```
 
 ## 🔧 开发
+
+### 流式输出支持
+
+iflow-bot 支持实时流式输出，让用户看到 AI "打字"的过程。
+
+**支持流式输出的渠道**：
+| 渠道 | 流式方式 | 说明 |
+|------|----------|------|
+| Telegram | 编辑消息 | 实时编辑消息内容 |
+| 钉钉 | AI Card | 使用钉钉卡片模板流式更新 |
+| Discord | 编辑消息 | 实时编辑消息内容（计划中） |
+| Slack | 编辑消息 | 实时编辑消息内容（计划中） |
+
+**配置要求**：
+- 需要使用 ACP 模式（`driver.mode = "acp"`）
+- 钉钉需要额外配置 AI Card 模板
+
+**流式输出缓冲机制**：
+- 内容累积到 10-25 个字符（随机）时推送一次更新
+- 避免过于频繁的 API 调用
+- 确保最终消息包含所有内容
+
+### Session 会话管理
+
+iflow-bot 自动管理多用户会话，支持跨渠道对话上下文。
+
+**Session 映射存储**：
+- 存储位置：`~/.iflow-bot/session_mappings.json`
+- 格式：`{渠道}:{聊天ID} -> {sessionId}`
+
+**Session 恢复机制**：
+- Gateway 重启后自动复用现有 ACP 进程
+- Session 失效时自动创建新会话
+- 支持通过 CLI 管理会话
+
+```bash
+# 查看所有会话
+iflow-bot sessions
+
+# 清除会话映射
+iflow-bot sessions --clear
+```
 
 ### 项目结构
 

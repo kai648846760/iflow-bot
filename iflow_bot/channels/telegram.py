@@ -238,7 +238,8 @@ class TelegramChannel(BaseChannel):
             self._stream_messages.pop(chat_id_str, None)
             self._last_stream_update.pop(chat_id_str, None)
             self._stream_buffer.pop(chat_id_str, None)
-            self._stop_typing(msg.chat_id)
+            # Ensure typing stops with correct key format
+            self._stop_typing(chat_id_str)
             logger.info(f"Streaming ended for chat {chat_id}")
             return
         
@@ -251,9 +252,10 @@ class TelegramChannel(BaseChannel):
         if msg.metadata.get("_progress"):
             return
         
-        # Clear streaming state for this chat
-        self._stream_messages.pop(str(chat_id), None)
-        self._stop_typing(msg.chat_id)
+        # Clear streaming state for this chat and stop typing
+        chat_id_str = str(chat_id)
+        self._stream_messages.pop(chat_id_str, None)
+        self._stop_typing(chat_id_str)
         
         logger.info(f"Sending final message to chat {chat_id}: content_len={len(msg.content) if msg.content else 0}")
         
@@ -358,6 +360,7 @@ class TelegramChannel(BaseChannel):
         # Update buffer with latest content and flush
         self._stream_buffer[chat_id_str] = content
         await self._flush_stream_buffer(chat_id, chat_id_str)
+        # Note: Keep typing indicator running during streaming
     
     async def _on_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.message or not update.effective_user:

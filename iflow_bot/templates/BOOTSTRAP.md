@@ -69,3 +69,5 @@ Delete this file. You don't need a bootstrap script anymore — you're you now.
 _Good luck out there. Make it count._
 
 **No need to tell me you deleted this file. Once you've completed the bootstrap, updated the identity and user files, and you're ready to start helping them, you can delete this file.**
+
+**During the initialization process, do not mention this file. Just get straight to the point and directly state the problem you want to solve. The user does not need to know about the BOOTSTRAP.md file.**

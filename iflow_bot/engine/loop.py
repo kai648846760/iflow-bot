@@ -50,7 +50,7 @@ class AgentLoop:
         self,
         bus: MessageBus,
         adapter: IFlowAdapter,
-        model: str = "glm-5",
+        model: str = "kimi-k2.5",
         streaming: bool = True,
         channel_manager: Optional["ChannelManager"] = None,
     ):
@@ -70,34 +70,74 @@ class AgentLoop:
 
         logger.info(f"AgentLoop initialized with model={model}, workspace={self.workspace}, streaming={streaming}")
 
-    def _get_bootstrap_content(self) -> Optional[str]:
-        """读取 BOOTSTRAP.md 内容。"""
+    def _get_bootstrap_content(self) -> tuple[Optional[str], bool]:
+        """读取引导内容。
+        
+        Returns:
+            tuple: (内容, 是否是 BOOTSTRAP)
+            - 如果 BOOTSTRAP.md 存在，返回 (BOOTSTRAP内容, True)
+            - 否则如果 AGENTS.md 存在，返回 (AGENTS内容, False)
+            - 都不存在，返回 (None, False)
+        """
+        # 优先检查 BOOTSTRAP.md
         bootstrap_file = self.workspace / "BOOTSTRAP.md"
         if bootstrap_file.exists():
             try:
                 content = bootstrap_file.read_text(encoding="utf-8")
                 logger.info("BOOTSTRAP.md detected - will inject bootstrap instructions")
-                return content
+                return content, True
             except Exception as e:
                 logger.error(f"Error reading BOOTSTRAP.md: {e}")
-        return None
-
-    def _inject_bootstrap(self, message: str, bootstrap_content: str) -> str:
-        """将 BOOTSTRAP 内容注入到消息中。
         
-        格式：
+        # 否则注入 AGENTS.md
+        agents_file = self.workspace / "AGENTS.md"
+        if agents_file.exists():
+            try:
+                content = agents_file.read_text(encoding="utf-8")
+                logger.debug("AGENTS.md detected - will inject agents context")
+                return content, False
+            except Exception as e:
+                logger.error(f"Error reading AGENTS.md: {e}")
+        
+        return None, False
+
+    def _inject_bootstrap(self, message: str, bootstrap_content: str, is_bootstrap: bool = True) -> str:
+        """将引导内容注入到消息中。
+        
+        Args:
+            message: 用户消息
+            bootstrap_content: 引导内容
+            is_bootstrap: 是否是 BOOTSTRAP 模式（首次引导）
+        
+        格式（BOOTSTRAP 模式）：
         [BOOTSTRAP - 首次启动引导 - 必须执行]
         {bootstrap_content}
         [/BOOTSTRAP]
         
         用户消息: {message}
+        
+        格式（AGENTS 模式）：
+        [AGENTS - 工作空间指南]
+        {agents_content}
+        [/AGENTS]
+        
+        用户消息: {message}
         """
-        return f"""[BOOTSTRAP - 首次启动引导 - 必须执行]
+        if is_bootstrap:
+            return f"""[BOOTSTRAP - 首次启动引导 - 必须执行]
 以下是首次启动引导文件，你必须按照其中的指示完成身份设置。
-完成引导后，请删除 workspace/BOOTSTRAP.md 文件。
+完成引导后，删除 workspace/BOOTSTRAP.md 文件,删除后只需要告诉用户已完成身份设置即可，无需告诉用户关于 BOOTSTRAP.md 文件的任何信息。
 
 {bootstrap_content}
 [/BOOTSTRAP]
+
+用户消息: {message}"""
+        else:
+            return f"""[AGENTS - 工作空间指南]
+以下是当前工作空间的行为指南，请严格遵循。
+
+{bootstrap_content}
+[/AGENTS]
 
 用户消息: {message}"""
 
@@ -163,13 +203,14 @@ time: {now}
             if channel_context:
                 message_content = channel_context + "\n\n" + message_content
             
-            # 检查 BOOTSTRAP.md 是否存在（每次都检查文件，不依赖内存状态）
-            bootstrap_content = self._get_bootstrap_content()
+            # 检查引导文件（优先 BOOTSTRAP.md，否则 AGENTS.md）
+            bootstrap_content, is_bootstrap = self._get_bootstrap_content()
             
-            # 如果 BOOTSTRAP.md 存在，注入引导内容
+            # 如果有引导内容，注入到消息中
             if bootstrap_content:
-                message_content = self._inject_bootstrap(message_content, bootstrap_content)
-                logger.info(f"Injected BOOTSTRAP for {msg.channel}:{msg.chat_id}")
+                message_content = self._inject_bootstrap(message_content, bootstrap_content, is_bootstrap)
+                mode = "BOOTSTRAP" if is_bootstrap else "AGENTS"
+                logger.info(f"Injected {mode} for {msg.channel}:{msg.chat_id}")
 
             # 检查是否支持流式输出
             supports_streaming = self.streaming and msg.channel in STREAMING_CHANNELS
@@ -335,13 +376,14 @@ time: {now}
             chat_id: 聊天 ID
             on_progress: 进度回调（可选）
         """
-        # 检查 BOOTSTRAP（每次都检查文件是否存在）
-        bootstrap_content = self._get_bootstrap_content()
+        # 检查引导文件（优先 BOOTSTRAP.md，否则 AGENTS.md）
+        bootstrap_content, is_bootstrap = self._get_bootstrap_content()
         
         message_content = message
         if bootstrap_content:
-            message_content = self._inject_bootstrap(message, bootstrap_content)
-            logger.info(f"Injected BOOTSTRAP for {channel}:{chat_id} (direct mode)")
+            message_content = self._inject_bootstrap(message, bootstrap_content, is_bootstrap)
+            mode = "BOOTSTRAP" if is_bootstrap else "AGENTS"
+            logger.info(f"Injected {mode} for {channel}:{chat_id} (direct mode)")
         
         # 如果提供了 session_key，使用它作为会话标识
         # 否则使用 channel:chat_id 格式
