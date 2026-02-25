@@ -32,6 +32,7 @@ dependencies = [
     "aiohttp>=3.9.0",
     "loguru>=0.7.0",
     "prompt-toolkit>=3.0.0",
+    "croniter>=6.0.0",
 ]
 
 [project.optional-dependencies]
