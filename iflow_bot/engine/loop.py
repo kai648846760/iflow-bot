@@ -16,16 +16,19 @@ from __future__ import annotations
 import asyncio
 import random
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from loguru import logger
 
 from iflow_bot.bus import MessageBus, InboundMessage, OutboundMessage
 from iflow_bot.engine.adapter import IFlowAdapter
 
+if TYPE_CHECKING:
+    from iflow_bot.channels.manager import ChannelManager
+
 
 # 支持流式输出的渠道列表
-STREAMING_CHANNELS = {"telegram", "discord", "slack"}
+STREAMING_CHANNELS = {"telegram", "discord", "slack", "dingtalk"}
 
 # 流式输出缓冲区大小范围（字符数）
 STREAM_BUFFER_MIN = 10
@@ -49,12 +52,14 @@ class AgentLoop:
         adapter: IFlowAdapter,
         model: str = "glm-5",
         streaming: bool = True,
+        channel_manager: Optional["ChannelManager"] = None,
     ):
         self.bus = bus
         self.adapter = adapter
         self.model = model
         self.streaming = streaming
         self.workspace = adapter.workspace
+        self.channel_manager = channel_manager
 
         self._running = False
         self._task: Optional[asyncio.Task] = None
@@ -225,6 +230,15 @@ time: {now}
         unflushed_count = 0
         current_threshold = random.randint(STREAM_BUFFER_MIN, STREAM_BUFFER_MAX)
         
+        # 钉钉使用直接调用方式（AI Card）
+        dingtalk_channel = None
+        if msg.channel == "dingtalk" and self.channel_manager:
+            dingtalk_channel = self.channel_manager.get_channel("dingtalk")
+            # 立即创建 AI Card，实现秒回卡片
+            if dingtalk_channel and hasattr(dingtalk_channel, 'start_streaming'):
+                await dingtalk_channel.start_streaming(msg.chat_id)
+            dingtalk_channel = self.channel_manager.get_channel("dingtalk")
+        
         async def on_chunk(channel: str, chat_id: str, chunk_text: str):
             """处理流式消息块，基于内容长度缓冲。"""
             nonlocal unflushed_count, current_threshold
@@ -239,16 +253,22 @@ time: {now}
             if unflushed_count >= current_threshold:
                 unflushed_count = 0
                 current_threshold = random.randint(STREAM_BUFFER_MIN, STREAM_BUFFER_MAX)
-                await self.bus.publish_outbound(OutboundMessage(
-                    channel=channel,
-                    chat_id=chat_id,
-                    content=self._stream_buffers[key],
-                    metadata={
-                        "_progress": True,
-                        "_streaming": True,
-                        "reply_to_id": msg.metadata.get("message_id"),
-                    },
-                ))
+                
+                # 钉钉：直接调用渠道的流式方法
+                if channel == "dingtalk" and dingtalk_channel and hasattr(dingtalk_channel, 'handle_streaming_chunk'):
+                    await dingtalk_channel.handle_streaming_chunk(chat_id, self._stream_buffers[key], is_final=False)
+                else:
+                    # 其他渠道：通过消息总线
+                    await self.bus.publish_outbound(OutboundMessage(
+                        channel=channel,
+                        chat_id=chat_id,
+                        content=self._stream_buffers[key],
+                        metadata={
+                            "_progress": True,
+                            "_streaming": True,
+                            "reply_to_id": msg.metadata.get("message_id"),
+                        },
+                    ))
         
         try:
             # 使用流式 chat
@@ -264,27 +284,31 @@ time: {now}
             final_content = self._stream_buffers.pop(session_key, "")
             
             if final_content:
-                # 先发送最终内容（确保不丢失剩余字符）
-                await self.bus.publish_outbound(OutboundMessage(
-                    channel=msg.channel,
-                    chat_id=msg.chat_id,
-                    content=final_content,
-                    metadata={
-                        "_progress": True,
-                        "_streaming": True,
-                        "reply_to_id": msg.metadata.get("message_id"),
-                    },
-                ))
-                # 再发送流式结束标记
-                await self.bus.publish_outbound(OutboundMessage(
-                    channel=msg.channel,
-                    chat_id=msg.chat_id,
-                    content="",
-                    metadata={
-                        "_streaming_end": True,
-                        "reply_to_id": msg.metadata.get("message_id"),
-                    },
-                ))
+                # 钉钉：直接调用最终更新
+                if msg.channel == "dingtalk" and dingtalk_channel and hasattr(dingtalk_channel, 'handle_streaming_chunk'):
+                    await dingtalk_channel.handle_streaming_chunk(msg.chat_id, final_content, is_final=True)
+                else:
+                    # 其他渠道：通过消息总线
+                    await self.bus.publish_outbound(OutboundMessage(
+                        channel=msg.channel,
+                        chat_id=msg.chat_id,
+                        content=final_content,
+                        metadata={
+                            "_progress": True,
+                            "_streaming": True,
+                            "reply_to_id": msg.metadata.get("message_id"),
+                        },
+                    ))
+                    # 再发送流式结束标记
+                    await self.bus.publish_outbound(OutboundMessage(
+                        channel=msg.channel,
+                        chat_id=msg.chat_id,
+                        content="",
+                        metadata={
+                            "_streaming_end": True,
+                            "reply_to_id": msg.metadata.get("message_id"),
+                        },
+                    ))
                 logger.info(f"Streaming response completed for {msg.channel}:{msg.chat_id}")
             
             return final_content or response

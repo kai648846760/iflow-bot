@@ -433,9 +433,14 @@ class IFlowAdapter:
             
             from iflow_bot.engine.acp import AgentMessageChunk
             
+            chunk_count = 0
+            
             async def handle_chunk(chunk: AgentMessageChunk):
                 """处理消息块并发送到渠道。"""
+                nonlocal chunk_count
                 if not chunk.is_thought and chunk.text and on_chunk:
+                    chunk_count += 1
+                    logger.debug(f"Stream chunk #{chunk_count}: {len(chunk.text)} chars")
                     await on_chunk(channel, chat_id, chunk.text)
             
             response = await adapter.chat_stream(
@@ -446,6 +451,8 @@ class IFlowAdapter:
                 timeout=timeout or self.timeout,
                 on_chunk=handle_chunk,
             )
+            
+            logger.info(f"Chat stream completed: {chunk_count} chunks sent")
             
             return response
         else:

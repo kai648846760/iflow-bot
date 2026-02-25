@@ -65,6 +65,9 @@ class DingTalkConfig(BaseModel):
     enabled: bool = False
     client_id: str = ""
     client_secret: str = ""
+    robot_code: str = ""  # 机器人代码（群聊需要）
+    card_template_id: str = ""  # AI Card 模板 ID（流式输出需要）
+    card_template_key: str = "content"  # AI Card 内容字段名
     allow_from: list[str] = Field(default_factory=list)
 
 

@@ -248,8 +248,10 @@ class ACPClient:
             except asyncio.CancelledError:
                 break
             except websockets.ConnectionClosed:
-                logger.warning("ACP WebSocket connection closed")
+                logger.warning("ACP WebSocket connection closed, will reconnect on next request")
                 self._connected = False
+                self._initialized = False
+                # 不跳出循环，等待下次请求时重连
                 break
             except json.JSONDecodeError as e:
                 logger.debug(f"ACP JSON decode error: {e}")
@@ -279,8 +281,12 @@ class ACPClient:
         Returns:
             响应结果
         """
+        # 如果连接断开，尝试重连
         if not self._connected or not self._ws:
-            raise ACPConnectionError("Not connected to ACP server")
+            logger.info("ACP connection lost, reconnecting...")
+            await self.connect()
+            await self.initialize()
+            await self.authenticate("iflow")
         
         request_id = self._next_request_id()
         
@@ -687,8 +693,28 @@ class ACPAdapter:
         
         self._client: Optional[ACPClient] = None
         self._session_map: dict[str, str] = {}  # channel:chat_id -> session_id
+        self._session_map_file = Path.home() / ".iflow-bot" / "session_mappings.json"
+        self._session_lock = asyncio.Lock()  # 防止并发创建 session
+        self._load_session_map()
         
         logger.info(f"ACPAdapter: host={host}, port={port}, workspace={workspace}")
+    
+    def _load_session_map(self) -> None:
+        """加载持久化的 session 映射。"""
+        if self._session_map_file.exists():
+            try:
+                with open(self._session_map_file, "r", encoding="utf-8") as f:
+                    self._session_map = json.load(f)
+                logger.debug(f"Loaded {len(self._session_map)} session mappings")
+            except json.JSONDecodeError:
+                logger.warning("Invalid session mapping file, starting fresh")
+                self._session_map = {}
+    
+    def _save_session_map(self) -> None:
+        """保存 session 映射到文件。"""
+        self._session_map_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(self._session_map_file, "w", encoding="utf-8") as f:
+            json.dump(self._session_map, f, indent=2, ensure_ascii=False)
     
     async def connect(self) -> None:
         """连接到 ACP 服务器并进行认证。"""
@@ -737,26 +763,61 @@ class ACPAdapter:
         """
         key = self._get_session_key(channel, chat_id)
         
+        # 如果 session 已存在，直接返回（不尝试 load，因为 ACP session 在服务端保持）
         if key in self._session_map:
-            session_id = self._session_map[key]
-            # 尝试加载已有会话
-            if self._client and await self._client.load_session(session_id):
-                return session_id
+            logger.debug(f"Reusing existing session: {key} -> {self._session_map[key][:16]}...")
+            return self._session_map[key]
         
-        # 创建新会话
-        if not self._client:
-            raise ACPConnectionError("ACP client not connected")
+        return await self._create_new_session(key, model)
+    
+    async def _create_new_session(
+        self,
+        key: str,
+        model: Optional[str] = None,
+    ) -> str:
+        """创建新会话。"""
+        async with self._session_lock:
+            # 再次检查，可能在等待锁时其他协程已创建
+            if key in self._session_map:
+                logger.debug(f"Session created by another request: {key} -> {self._session_map[key][:16]}...")
+                return self._session_map[key]
+            
+            # 创建新会话
+            if not self._client:
+                raise ACPConnectionError("ACP client not connected")
+            
+            session_id = await self._client.create_session(
+                workspace=self.workspace,
+                model=model or self.default_model,
+                approval_mode="yolo",
+            )
+            
+            self._session_map[key] = session_id
+            self._save_session_map()
+            logger.info(f"ACP session mapped: {key} -> {session_id[:16]}...")
+            
+            return session_id
+    
+    async def _invalidate_session(self, key: str) -> None:
+        """使 session 失效并清除映射。"""
+        if key in self._session_map:
+            old_session = self._session_map.pop(key)
+            self._save_session_map()
+            logger.info(f"Session invalidated: {key} -> {old_session[:16]}...")
+    
+    async def _get_or_create_session_with_retry(
+        self,
+        channel: str,
+        chat_id: str,
+        model: Optional[str] = None,
+    ) -> str:
+        """获取或创建 session，如果失效则自动重建。"""
+        key = self._get_session_key(channel, chat_id)
         
-        session_id = await self._client.create_session(
-            workspace=self.workspace,
-            model=model or self.default_model,
-            approval_mode="yolo",
-        )
+        if key in self._session_map:
+            return self._session_map[key]
         
-        self._session_map[key] = session_id
-        logger.info(f"ACP session mapped: {key} -> {session_id[:16]}...")
-        
-        return session_id
+        return await self._create_new_session(key, model)
     
     async def chat(
         self,
@@ -782,6 +843,7 @@ class ACPAdapter:
         if not self._client:
             raise ACPConnectionError("ACP client not connected")
         
+        key = self._get_session_key(channel, chat_id)
         session_id = await self._get_or_create_session(channel, chat_id, model)
         
         response = await self._client.prompt(
@@ -789,6 +851,17 @@ class ACPAdapter:
             message=message,
             timeout=timeout or self.timeout,
         )
+        
+        # 如果 session 失效，自动重建并重试
+        if response.error and "Invalid request" in response.error:
+            logger.warning(f"Session invalid, recreating: {key}")
+            await self._invalidate_session(key)
+            session_id = await self._create_new_session(key, model)
+            response = await self._client.prompt(
+                session_id=session_id,
+                message=message,
+                timeout=timeout or self.timeout,
+            )
         
         if response.error:
             raise ACPError(f"Chat error: {response.error}")
@@ -827,6 +900,7 @@ class ACPAdapter:
         if not self._client:
             raise ACPConnectionError("ACP client not connected")
         
+        key = self._get_session_key(channel, chat_id)
         session_id = await self._get_or_create_session(channel, chat_id, model)
         
         # 收集完整响应
@@ -855,6 +929,20 @@ class ACPAdapter:
             on_chunk=handle_chunk,
             on_tool_call=handle_tool_call,
         )
+        
+        # 如果 session 失效，自动重建并重试
+        if response.error and "Invalid request" in response.error:
+            logger.warning(f"Session invalid (stream), recreating: {key}")
+            await self._invalidate_session(key)
+            session_id = await self._create_new_session(key, model)
+            content_parts.clear()
+            response = await self._client.prompt(
+                session_id=session_id,
+                message=message,
+                timeout=timeout or self.timeout,
+                on_chunk=handle_chunk,
+                on_tool_call=handle_tool_call,
+            )
         
         if response.error:
             raise ACPError(f"Chat error: {response.error}")

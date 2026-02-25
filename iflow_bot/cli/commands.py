@@ -452,18 +452,33 @@ def get_data_dir() -> Path:
 async def _start_acp_server(port: int = 8090) -> Optional[asyncio.subprocess.Process]:
     """启动 iflow ACP 服务。
     
-    执行: iflow --experimental-acp --port {port}
+    如果端口已被占用，则复用现有进程。
+    
+    执行: iflow --experimental-acp --stream --port {port}
     
     Args:
         port: ACP 服务端口
         
     Returns:
-        成功返回进程对象，失败返回 None
+        成功返回进程对象，复用现有进程返回 None
     """
+    import socket
+    
+    # 检查端口是否已被占用
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    result = sock.connect_ex(('localhost', port))
+    sock.close()
+    
+    if result == 0:
+        # 端口已被占用，复用现有进程
+        print(f"ACP 服务已在运行 (端口 {port})，复用现有进程")
+        return None
+    
     try:
         process = await asyncio.create_subprocess_exec(
             "iflow",
             "--experimental-acp",
+            "--stream",
             "--port", str(port),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -536,12 +551,21 @@ async def _run_gateway(config, verbose: bool = False) -> None:
     acp_process = None
     if mode == "acp":
         console.print(f"[bold cyan]启动 ACP 服务 (端口: {acp_port})...[/bold cyan]")
-        acp_process = await _start_acp_server(acp_port)
-        if acp_process:
+        result = await _start_acp_server(acp_port)
+        if result is not None:
+            acp_process = result
             console.print(f"[green]✓[/green] ACP 服务已启动 (PID: {acp_process.pid})")
         else:
-            console.print("[red]✗ ACP 服务启动失败，回退到 CLI 模式[/red]")
-            mode = "cli"
+            # 检查端口是否已被占用（复用现有进程）
+            import socket
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            port_in_use = sock.connect_ex(('localhost', acp_port)) == 0
+            sock.close()
+            if port_in_use:
+                console.print(f"[green]✓[/green] 复用现有 ACP 服务 (端口: {acp_port})")
+            else:
+                console.print("[red]✗ ACP 服务启动失败，回退到 CLI 模式[/red]")
+                mode = "cli"
     
     # 创建适配器
     adapter = IFlowAdapter(
@@ -560,6 +584,7 @@ async def _run_gateway(config, verbose: bool = False) -> None:
         bus=bus,
         adapter=adapter,
         model=config.get_model(),
+        channel_manager=channel_manager,
     )
     
     # 创建 Cron 服务
