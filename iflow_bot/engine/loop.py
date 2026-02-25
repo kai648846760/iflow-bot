@@ -5,6 +5,10 @@ BOOTSTRAP 引导机制：
 - 如果存在，将内容作为系统前缀注入到消息中
 - AI 会自动执行引导流程
 - 引导完成后 AI 会删除 BOOTSTRAP.md
+
+流式输出支持：
+- ACP 模式下支持实时流式输出到渠道
+- 消息块会实时发送到支持流式的渠道（如 Telegram）
 """
 
 from __future__ import annotations
@@ -19,6 +23,10 @@ from iflow_bot.bus import MessageBus, InboundMessage, OutboundMessage
 from iflow_bot.engine.adapter import IFlowAdapter
 
 
+# 支持流式输出的渠道列表
+STREAMING_CHANNELS = {"telegram", "discord", "slack"}
+
+
 class AgentLoop:
     """Agent 主循环 - 处理来自各渠道的消息。
 
@@ -26,7 +34,7 @@ class AgentLoop:
     1. 检查 BOOTSTRAP.md 是否存在（首次启动引导）
     2. 从消息总线获取入站消息
     3. 通过 SessionMappingManager 获取/创建会话 ID
-    4. 调用 IFlowAdapter 发送消息到 iflow
+    4. 调用 IFlowAdapter 发送消息到 iflow（支持流式）
     5. 将响应发布到消息总线
     """
 
@@ -35,16 +43,22 @@ class AgentLoop:
         bus: MessageBus,
         adapter: IFlowAdapter,
         model: str = "glm-5",
+        streaming: bool = True,
     ):
         self.bus = bus
         self.adapter = adapter
         self.model = model
+        self.streaming = streaming
         self.workspace = adapter.workspace
 
         self._running = False
         self._task: Optional[asyncio.Task] = None
+        
+        # 流式消息缓冲区
+        self._stream_buffers: dict[str, str] = {}
+        self._stream_tasks: dict[str, asyncio.Task] = {}
 
-        logger.info(f"AgentLoop initialized with model={model}, workspace={self.workspace}")
+        logger.info(f"AgentLoop initialized with model={model}, workspace={self.workspace}, streaming={streaming}")
 
     def _get_bootstrap_content(self) -> Optional[str]:
         """读取 BOOTSTRAP.md 内容。"""
@@ -147,16 +161,23 @@ time: {now}
                 message_content = self._inject_bootstrap(message_content, bootstrap_content)
                 logger.info(f"Injected BOOTSTRAP for {msg.channel}:{msg.chat_id}")
 
-            # 调用 iflow
-            response = await self.adapter.chat(
-                message=message_content,
-                channel=msg.channel,
-                chat_id=msg.chat_id,
-                model=self.model,
-            )
+            # 检查是否支持流式输出
+            supports_streaming = self.streaming and msg.channel in STREAMING_CHANNELS
+            
+            if supports_streaming:
+                # 流式模式
+                response = await self._process_with_streaming(msg, message_content)
+            else:
+                # 非流式模式
+                response = await self.adapter.chat(
+                    message=message_content,
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    model=self.model,
+                )
 
-            # 发送最终响应
-            if response:
+            # 发送最终响应（如果有内容且不是流式模式）
+            if response and not supports_streaming:
                 await self.bus.publish_outbound(OutboundMessage(
                     channel=msg.channel,
                     chat_id=msg.chat_id,
@@ -172,6 +193,85 @@ time: {now}
                 chat_id=msg.chat_id,
                 content=f"❌ 处理消息时出错: {e}",
             ))
+
+    async def _process_with_streaming(
+        self,
+        msg: InboundMessage,
+        message_content: str,
+    ) -> str:
+        """
+        流式处理消息并发送实时更新到渠道。
+        
+        Args:
+            msg: 入站消息
+            message_content: 准备好的消息内容
+        
+        Returns:
+            最终响应文本
+        """
+        session_key = f"{msg.channel}:{msg.chat_id}"
+        
+        # 初始化缓冲区
+        self._stream_buffers[session_key] = ""
+        
+        # 创建消息 ID 用于流式更新
+        stream_message_id = f"stream_{session_key}"
+        
+        async def on_chunk(channel: str, chat_id: str, chunk_text: str):
+            """处理流式消息块。"""
+            key = f"{channel}:{chat_id}"
+            
+            # 更新缓冲区
+            self._stream_buffers[key] = self._stream_buffers.get(key, "") + chunk_text
+            
+            # 发送进度消息
+            current_content = self._stream_buffers[key]
+            
+            # 使用特殊的元数据标记这是流式更新
+            await self.bus.publish_outbound(OutboundMessage(
+                channel=channel,
+                chat_id=chat_id,
+                content=current_content,
+                metadata={
+                    "_progress": True,
+                    "_streaming": True,
+                    "reply_to_id": msg.metadata.get("message_id"),
+                },
+            ))
+        
+        try:
+            # 使用流式 chat
+            response = await self.adapter.chat_stream(
+                message=message_content,
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                model=self.model,
+                on_chunk=on_chunk,
+            )
+            
+            # 清理缓冲区
+            final_content = self._stream_buffers.pop(session_key, "")
+            
+            # 发送最终响应标记，让渠道知道流式结束
+            # 不再发送内容，因为流式消息已经发送过了
+            if final_content:
+                await self.bus.publish_outbound(OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content="",  # 空内容，只是标记结束
+                    metadata={
+                        "_streaming_end": True,  # 标记流式结束
+                        "reply_to_id": msg.metadata.get("message_id"),
+                    },
+                ))
+                logger.info(f"Streaming response completed for {msg.channel}:{msg.chat_id}")
+            
+            return final_content or response
+            
+        except Exception as e:
+            # 清理缓冲区
+            self._stream_buffers.pop(session_key, None)
+            raise e
 
     async def process_direct(
         self,

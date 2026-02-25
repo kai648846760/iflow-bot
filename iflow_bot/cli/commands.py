@@ -449,6 +449,58 @@ def get_data_dir() -> Path:
     return data_dir
 
 
+async def _start_acp_server(port: int = 8090) -> Optional[asyncio.subprocess.Process]:
+    """启动 iflow ACP 服务。
+    
+    执行: iflow --experimental-acp --port {port}
+    
+    Args:
+        port: ACP 服务端口
+        
+    Returns:
+        成功返回进程对象，失败返回 None
+    """
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "iflow",
+            "--experimental-acp",
+            "--port", str(port),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
+        
+        # 等待服务启动
+        await asyncio.sleep(2)
+        
+        # 检查进程是否还在运行
+        if process.returncode is not None:
+            stderr = await process.stderr.read()
+            logger.error(f"ACP server failed to start: {stderr.decode()}")
+            return None
+        
+        return process
+    except FileNotFoundError:
+        logger.error("iflow command not found")
+        return None
+    except Exception as e:
+        logger.error(f"Failed to start ACP server: {e}")
+        return None
+
+
+async def _stop_acp_server(process: asyncio.subprocess.Process) -> None:
+    """停止 ACP 服务进程。"""
+    if process.returncode is None:
+        try:
+            process.terminate()
+            await asyncio.wait_for(process.wait(), timeout=5)
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
+        except Exception as e:
+            logger.warning(f"Error stopping ACP server: {e}")
+
+
 # 内部命令 - 用于后台启动
 @app.command("_run_gateway", hidden=True)
 def _run_gateway_cmd():
@@ -476,11 +528,29 @@ async def _run_gateway(config, verbose: bool = False) -> None:
     
     workspace = config.get_workspace()
     
+    # 获取模式配置
+    mode = getattr(config.driver, "mode", "cli") if hasattr(config, "driver") and config.driver else "cli"
+    acp_port = getattr(config.driver, "acp_port", 8090) if hasattr(config, "driver") and config.driver else 8090
+    
+    # ACP 模式：启动 iflow ACP 服务
+    acp_process = None
+    if mode == "acp":
+        console.print(f"[bold cyan]启动 ACP 服务 (端口: {acp_port})...[/bold cyan]")
+        acp_process = await _start_acp_server(acp_port)
+        if acp_process:
+            console.print(f"[green]✓[/green] ACP 服务已启动 (PID: {acp_process.pid})")
+        else:
+            console.print("[red]✗ ACP 服务启动失败，回退到 CLI 模式[/red]")
+            mode = "cli"
+    
+    # 创建适配器
     adapter = IFlowAdapter(
         default_model=config.get_model(),
         workspace=workspace if workspace else None,
         timeout=config.get_timeout(),
         thinking=config.driver.thinking if hasattr(config, "driver") and config.driver else False,
+        mode=mode,
+        acp_port=acp_port,
     )
     
     bus = MessageBus()
@@ -603,6 +673,7 @@ async def _run_gateway(config, verbose: bool = False) -> None:
             console.print(f"[dim]  定时任务: {cron_status['jobs']} 个[/dim]")
         
         console.print("[dim]  心跳: 每 30 分钟[/dim]")
+        console.print(f"[dim]  模式: {mode.upper()}[/dim]")
         console.print("[dim]按 Ctrl+C 停止[/dim]")
         
         while True:
@@ -615,6 +686,11 @@ async def _run_gateway(config, verbose: bool = False) -> None:
         agent_loop.stop()
         await channel_manager.stop_all()
         await adapter.close()
+        
+        # 关闭 ACP 服务
+        if acp_process:
+            console.print("[dim]正在关闭 ACP 服务...[/dim]")
+            await _stop_acp_server(acp_process)
 
 
 # ============================================================================
@@ -897,6 +973,8 @@ def onboard(
     # 完整的默认配置模板
     default_config = {
         "driver": {
+            "mode": "acp",
+            "acp_port": 8090,
             "iflow_path": "iflow",
             "model": "glm-5",
             "yolo": True,

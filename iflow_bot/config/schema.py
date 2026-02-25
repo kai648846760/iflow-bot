@@ -136,6 +136,9 @@ class DriverConfig(BaseModel):
     """
     model_config = {"extra": "ignore"}
     
+    mode: Literal["cli", "acp"] = "acp"
+    """通信模式: cli (子进程调用) 或 acp (Agent Communication Protocol)"""
+    
     iflow_path: str = "iflow"
     model: str = ""
     yolo: bool = True
@@ -144,6 +147,13 @@ class DriverConfig(BaseModel):
     timeout: int = 300
     workspace: str = ""  # 关键：iflow 工作目录
     extra_args: list[str] = Field(default_factory=list)
+    
+    # ACP 模式配置
+    acp_port: int = 8090
+    """ACP 模式下的端口号"""
+    
+    acp_host: str = "localhost"
+    """ACP 模式下的主机地址"""
 
 
 # ============================================================================

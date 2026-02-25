@@ -113,6 +113,7 @@ class TelegramChannel(BaseChannel):
         self.config: TelegramConfig = config
         self._app: Application | None = None
         self._typing_tasks: dict[str, asyncio.Task] = {}
+        self._stream_messages: dict[str, int] = {}  # chat_id -> message_id for streaming
     
     async def start(self) -> None:
         """Start the Telegram bot with long polling."""
@@ -163,6 +164,8 @@ class TelegramChannel(BaseChannel):
         for chat_id in list(self._typing_tasks):
             self._stop_typing(chat_id)
         
+        self._stream_messages.clear()
+        
         if self._app:
             logger.info("Stopping Telegram bot...")
             await self._app.updater.stop()
@@ -176,16 +179,36 @@ class TelegramChannel(BaseChannel):
             logger.warning("Telegram bot not running")
             return
         
-        # Check if this is a progress message - skip it
-        if msg.metadata.get("_progress"):
-            return
-        self._stop_typing(msg.chat_id)
-        
         try:
             chat_id = int(msg.chat_id)
         except ValueError:
             logger.error("Invalid chat_id: {}", msg.chat_id)
             return
+        
+        # Log outbound message for debugging
+        logger.debug(f"Telegram outbound: chat_id={chat_id}, streaming={msg.metadata.get('_streaming')}, progress={msg.metadata.get('_progress')}, content_len={len(msg.content) if msg.content else 0}")
+        
+        # Handle streaming end - just clear state, don't send duplicate message
+        if msg.metadata.get("_streaming_end"):
+            self._stream_messages.pop(str(chat_id), None)
+            self._stop_typing(msg.chat_id)
+            logger.info(f"Streaming ended for chat {chat_id}")
+            return
+        
+        # Handle streaming messages first (before _progress check)
+        if msg.metadata.get("_streaming"):
+            await self._handle_streaming_message(chat_id, msg)
+            return
+        
+        # Skip other progress messages
+        if msg.metadata.get("_progress"):
+            return
+        
+        # Clear streaming state for this chat
+        self._stream_messages.pop(str(chat_id), None)
+        self._stop_typing(msg.chat_id)
+        
+        logger.info(f"Sending final message to chat {chat_id}: content_len={len(msg.content) if msg.content else 0}")
         
         reply_params = None
         reply_to_message_id = msg.metadata.get("message_id")
@@ -224,6 +247,77 @@ class TelegramChannel(BaseChannel):
                         )
                     except Exception as e2:
                         logger.error("Error sending Telegram message: {}", e2)
+    
+    async def _handle_streaming_message(self, chat_id: int, msg: OutboundMessage) -> None:
+        """Handle streaming message updates by editing the same message."""
+        content = msg.content
+        if not content or content == "[empty message]":
+            logger.debug(f"Skipping empty streaming message for chat {chat_id}")
+            return
+        
+        chat_id_str = str(chat_id)
+        
+        # Check if we already have a streaming message for this chat
+        existing_message_id = self._stream_messages.get(chat_id_str)
+        
+        logger.info(f"Streaming message: chat={chat_id}, existing_msg_id={existing_message_id}, content_len={len(content)}")
+        
+        # Limit content length for Telegram (4000 chars to leave room)
+        display_content = content[:4000] if len(content) > 4000 else content
+        
+        try:
+            html = _markdown_to_telegram_html(display_content)
+        except Exception as e:
+            logger.warning(f"Markdown to HTML failed: {e}")
+            html = display_content
+        
+        try:
+            if existing_message_id:
+                # Edit existing message
+                await self._app.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=existing_message_id,
+                    text=html,
+                    parse_mode="HTML",
+                )
+                logger.info(f"Edited streaming message {existing_message_id} in chat {chat_id}")
+            else:
+                # Send new message and store its ID
+                reply_to_id = msg.metadata.get("reply_to_id")
+                reply_params = None
+                if reply_to_id:
+                    reply_params = ReplyParameters(message_id=reply_to_id, allow_sending_without_reply=True)
+                
+                sent_message = await self._app.bot.send_message(
+                    chat_id=chat_id,
+                    text=html,
+                    parse_mode="HTML",
+                    reply_parameters=reply_params,
+                )
+                self._stream_messages[chat_id_str] = sent_message.message_id
+                logger.info(f"Sent new streaming message {sent_message.message_id} to chat {chat_id}")
+                
+        except Exception as e:
+            # If edit fails (message too long, etc.), try sending new message
+            if "message is not modified" in str(e).lower():
+                return  # Ignore if content is the same
+            logger.debug("Streaming message error, sending new: {}", e)
+            try:
+                reply_to_id = msg.metadata.get("reply_to_id")
+                reply_params = None
+                if reply_to_id:
+                    reply_params = ReplyParameters(message_id=reply_to_id, allow_sending_without_reply=True)
+                
+                sent_message = await self._app.bot.send_message(
+                    chat_id=chat_id,
+                    text=html,
+                    parse_mode="HTML",
+                    reply_parameters=reply_params,
+                )
+                self._stream_messages[chat_id_str] = sent_message.message_id
+                logger.info(f"Sent fallback streaming message {sent_message.message_id} to chat {chat_id}")
+            except Exception as e2:
+                logger.error("Failed to send streaming message: {}", e2)
     
     async def _on_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.message or not update.effective_user:

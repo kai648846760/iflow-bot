@@ -75,6 +75,8 @@ def _create_default_config(config_path: Path) -> None:
     
     default_config = {
         "driver": {
+            "mode": "acp",
+            "acp_port": 8090,
             "iflow_path": "iflow",
             "model": "glm-5",
             "yolo": True,
