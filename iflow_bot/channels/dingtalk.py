@@ -432,9 +432,12 @@ class DingTalkChannel(BaseChannel):
 
         由 AgentLoop 调用，实现打字机效果。
 
+        注意：chunk 参数已经是累积后的完整内容（由 AgentLoop 累积），
+        这里直接使用，不再重复累积。
+
         Args:
             chat_id: 聊天 ID
-            chunk: 新增的文本内容
+            chunk: 累积后的完整文本内容
             is_final: 是否是最终消息
         """
         target_key = self._get_target_key(chat_id)
@@ -443,9 +446,8 @@ class DingTalkChannel(BaseChannel):
         if target_key not in self._streaming_buffers:
             await self.start_streaming(chat_id)
 
-        # 累积内容
-        self._streaming_buffers[target_key] += chunk
-        full_content = self._streaming_buffers[target_key]
+        # 直接使用传入的内容（已经是累积后的）
+        full_content = chunk
 
         # 获取 Card
         card_id = self._streaming_card_ids.get(target_key)
