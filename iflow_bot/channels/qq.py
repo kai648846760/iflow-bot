@@ -174,6 +174,17 @@ class QQChannel(BaseChannel):
             if not content:
                 return
 
+            # 先发送 "Thinking..." 提示（非阻塞，不影响主流程）
+            try:
+                if self._client:
+                    await self._client.api.post_c2c_message(
+                        openid=user_id,
+                        msg_type=0,  # 文本消息
+                        content="🤔 Thinking...",
+                    )
+            except Exception as e:
+                logger.debug(f"[{self.name}] Failed to send thinking: {e}")
+
             # 转发到消息总线
             await self._handle_message(
                 sender_id=user_id,

@@ -20,11 +20,12 @@ class ChannelRecorder:
     """Records channel messages to JSON files.
     
     Directory structure:
-        ~/.iflow-bot/workspace/channel/{channel_name}/{date}.json
+        ~/.iflow-bot/workspace/channel/{channel_name}/{chat_id}-{date}.json
     
     Each JSON file contains:
     {
         "channel": "telegram",
+        "chat_id": "5583237352",
         "date": "2026-02-26",
         "messages": [
             {
@@ -33,7 +34,7 @@ class ChannelRecorder:
                 "direction": "inbound|outbound",
                 "role": "user|assistant",
                 "content": "消息内容",
-                "chat_id": "123456"
+                "chat_id": "5583237352"
             }
         ]
     }
@@ -53,11 +54,20 @@ class ChannelRecorder:
         dir_path.mkdir(parents=True, exist_ok=True)
         return dir_path
     
-    def _get_date_file(self, channel: str, date: Optional[str] = None) -> Path:
-        """Get the JSON file path for a specific channel and date."""
+    def _get_date_file(self, channel: str, chat_id: str, date: Optional[str] = None) -> Path:
+        """Get the JSON file path for a specific channel, chat_id and date.
+        
+        Args:
+            channel: Channel name (e.g., 'telegram', 'qq')
+            chat_id: User/chat identifier for isolation
+            date: Date string in YYYY-MM-DD format. Defaults to current UTC date.
+        
+        Returns:
+            Path to the JSON file: {chat_id}-{date}.json
+        """
         if date is None:
             date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        return self._get_channel_dir(channel) / f"{date}.json"
+        return self._get_channel_dir(channel) / f"{chat_id}-{date}.json"
     
     def _load_messages(self, file_path: Path) -> dict:
         """Load existing messages from file."""
@@ -68,10 +78,20 @@ class ChannelRecorder:
             except (json.JSONDecodeError, IOError) as e:
                 logger.warning(f"Failed to load channel log {file_path}: {e}")
         
-        # Return empty structure
-        date = file_path.stem
+        # Return empty structure - extract chat_id from filename
+        # Format: {chat_id}-{date}.json
+        filename = file_path.stem
+        parts = filename.rsplit("-", 2)  # Split from right to handle chat_id with dashes
+        if len(parts) >= 3:
+            chat_id = "-".join(parts[:-2])
+            date = "-".join(parts[-2:])
+        else:
+            chat_id = "unknown"
+            date = filename
+        
         return {
             "channel": file_path.parent.name,
+            "chat_id": chat_id,
             "date": date,
             "messages": []
         }
@@ -90,7 +110,7 @@ class ChannelRecorder:
         Args:
             msg: The inbound message to record.
         """
-        file_path = self._get_date_file(msg.channel)
+        file_path = self._get_date_file(msg.channel, msg.chat_id)
         data = self._load_messages(file_path)
         
         message_entry = {
@@ -132,7 +152,7 @@ class ChannelRecorder:
         if is_streaming_end and not msg.content:
             return
         
-        file_path = self._get_date_file(msg.channel)
+        file_path = self._get_date_file(msg.channel, msg.chat_id)
         data = self._load_messages(file_path)
         
         message_entry = {
