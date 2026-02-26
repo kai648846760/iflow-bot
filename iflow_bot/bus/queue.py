@@ -6,6 +6,7 @@ from typing import Optional
 from loguru import logger
 
 from iflow_bot.bus.events import InboundMessage, OutboundMessage
+from iflow_bot.session.recorder import ChannelRecorder, get_recorder
 
 
 class MessageBus:
@@ -32,16 +33,24 @@ class MessageBus:
         msg = await bus.consume_outbound()
     """
     
-    def __init__(self, max_size: int = 100):
+    def __init__(self, max_size: int = 100, recorder: Optional[ChannelRecorder] = None):
         """
         Initialize the message bus.
         
         Args:
             max_size: Maximum queue size for each direction.
+            recorder: Optional ChannelRecorder instance. If not provided, uses global recorder.
         """
         self._inbound: asyncio.Queue[InboundMessage] = asyncio.Queue(maxsize=max_size)
         self._outbound: asyncio.Queue[OutboundMessage] = asyncio.Queue(maxsize=max_size)
         self._running = True
+        self._recorder = recorder
+    
+    def _get_recorder(self) -> Optional[ChannelRecorder]:
+        """Get the recorder instance."""
+        if self._recorder is not None:
+            return self._recorder
+        return get_recorder()
     
     async def publish_inbound(self, msg: InboundMessage) -> None:
         """
@@ -57,6 +66,11 @@ class MessageBus:
         try:
             await self._inbound.put(msg)
             logger.debug(f"Published inbound message from {msg.channel}:{msg.chat_id}")
+            
+            # Record the inbound message
+            recorder = self._get_recorder()
+            if recorder:
+                recorder.record_inbound(msg)
         except asyncio.QueueFull:
             logger.warning("Inbound queue full, dropping message")
     
@@ -91,6 +105,11 @@ class MessageBus:
         try:
             await self._outbound.put(msg)
             logger.debug(f"Published outbound message to {msg.channel}:{msg.chat_id}")
+            
+            # Record the outbound message
+            recorder = self._get_recorder()
+            if recorder:
+                recorder.record_outbound(msg)
         except asyncio.QueueFull:
             logger.warning("Outbound queue full, dropping message")
     

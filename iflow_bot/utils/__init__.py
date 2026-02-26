@@ -7,6 +7,7 @@ from iflow_bot.utils.helpers import (
     get_workspace_dir,
     get_sessions_dir,
     get_media_dir,
+    get_channel_dir,
     ensure_directories,
 )
 
@@ -17,5 +18,6 @@ __all__ = [
     "get_workspace_dir",
     "get_sessions_dir",
     "get_media_dir",
+    "get_channel_dir",
     "ensure_directories",
 ]

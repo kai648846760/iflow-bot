@@ -257,6 +257,10 @@ def init_workspace(workspace: Path) -> None:
         shutil.copy2(memory_src, memory_dst)
         console.print(f"[green]✓[/green] Created {memory_dst}")
 
+    # 创建 channel 目录（用于记录各渠道对话）
+    channel_dir = workspace / "channel"
+    channel_dir.mkdir(exist_ok=True)
+
 
 # ============================================================================
 # 主命令

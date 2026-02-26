@@ -41,6 +41,17 @@ def get_media_dir() -> Path:
     return media
 
 
+def get_channel_dir() -> Path:
+    """Get the channel message recording directory.
+    
+    Directory structure:
+        ~/.iflow-bot/workspace/channel/{channel_name}/{date}.json
+    """
+    channel_dir = get_workspace_dir() / "channel"
+    channel_dir.mkdir(parents=True, exist_ok=True)
+    return channel_dir
+
+
 def ensure_directories() -> None:
     """Ensure all required directories exist."""
     get_config_dir()
@@ -48,3 +59,4 @@ def ensure_directories() -> None:
     get_workspace_dir()
     get_sessions_dir()
     get_media_dir()
+    get_channel_dir()
