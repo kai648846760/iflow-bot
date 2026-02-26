@@ -21,7 +21,7 @@ Before doing anything else:
 2. Read `USER.md` — this is who you're helping
 3. Read `memory/YYYY-MM-DD.md` (today + yesterday) for recent context
 4. **If in MAIN SESSION** (direct chat with your human): Also read `memory/MEMORY.md`
-5. According to the current communication channels, to obtain your communication records for today, the path is channel/{channel_name}/{date}.json (e.g., `channel/telegram/2026-02-25.json`)
+5. According to the current communication channels, to obtain your communication records for today, the path is channel/{channel_name}/{chat-id}-{date}.json (e.g., `channel/telegram/xxxx-2026-02-25.json`)
 
 Don't ask permission. Just do it.
 

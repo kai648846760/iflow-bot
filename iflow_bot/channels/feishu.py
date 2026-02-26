@@ -314,8 +314,19 @@ class FeishuChannel(BaseChannel):
         # Start WebSocket client in a separate thread with reconnect loop
         def run_ws() -> None:
             import time
+            import asyncio
             while self._running:
                 try:
+                    # 关键修复：lark_oapi/ws/client.py 在模块级别调用 asyncio.get_event_loop()
+                    # 并保存在模块变量中。我们需要替换这个变量为新线程的事件循环
+                    import lark_oapi.ws.client as ws_client_module
+                    
+                    # 创建新的事件循环并替换模块变量
+                    new_loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(new_loop)
+                    ws_client_module.loop = new_loop
+                    
+                    # 现在可以安全地调用 start()
                     self._ws_client.start()
                 except Exception as e:
                     logger.warning(f"Feishu WebSocket error: {e}")
