@@ -139,11 +139,11 @@ class DriverConfig(BaseModel):
     """
     model_config = {"extra": "ignore"}
     
-    mode: Literal["cli", "acp"] = "acp"
-    """通信模式: cli (子进程调用) 或 acp (Agent Communication Protocol)"""
+    mode: Literal["cli", "acp", "stdio"] = "stdio"
+    """通信模式: cli (子进程调用), acp (WebSocket), 或 stdio (直接通过 stdin/stdout)"""
     
     iflow_path: str = "iflow"
-    model: str = ""
+    model: str = "minimax-m2.5"
     yolo: bool = True
     thinking: bool = False
     max_turns: int = 40

@@ -1104,10 +1104,10 @@ def onboard(
     # 完整的默认配置模板
     default_config = {
         "driver": {
-            "mode": "acp",
+            "mode": "stdio",
             "acp_port": 8090,
             "iflow_path": "iflow",
-            "model": "glm-5",
+            "model": "minimax-m2.5",
             "yolo": True,
             "thinking": False,
             "max_turns": 40,

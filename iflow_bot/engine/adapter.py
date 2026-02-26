@@ -89,11 +89,12 @@ class SessionMappingManager:
 
 
 class IFlowAdapter:
-    """IFlow CLI 适配器 - 支持两种通信模式。
+    """IFlow CLI 适配器 - 支持三种通信模式。
     
     模式：
     - cli: 通过子进程调用 iflow 命令（默认）
-    - acp: 通过 ACP 协议（WebSocket）连接 iflow
+    - acp: 通过 WebSocket 连接 iflow ACP 服务
+    - stdio: 通过 stdio 直接与 iflow --experimental-acp 通信
     
     所有用户共享同一个 workspace，通过会话 ID 映射区分不同用户。
     """
@@ -105,7 +106,7 @@ class IFlowAdapter:
         iflow_path: str = "iflow",
         workspace: Optional[Path] = None,
         thinking: bool = False,
-        mode: Literal["cli", "acp"] = "cli",
+        mode: Literal["cli", "acp", "stdio"] = "cli",
         acp_host: str = "localhost",
         acp_port: int = 8090,
     ):
@@ -133,6 +134,8 @@ class IFlowAdapter:
         
         # ACP 模式适配器（懒加载）
         self._acp_adapter: Optional["ACPAdapter"] = None
+        # Stdio ACP 模式适配器（懒加载）
+        self._stdio_adapter: Optional["StdioACPAdapter"] = None
         
         logger.info(f"IFlowAdapter: mode={mode}, workspace={self.workspace}, model={default_model}, thinking={thinking}")
     
@@ -160,13 +163,20 @@ class IFlowAdapter:
             logger.info(f"ACP adapter connected: {self.acp_host}:{self.acp_port}")
         return self._acp_adapter
 
-    @property
-    def project_hash(self) -> str:
-        return hashlib.sha256(str(self.workspace.resolve()).encode()).hexdigest()[:64]
-
-    @property
-    def iflow_sessions_dir(self) -> Path:
-        return Path.home() / ".iflow" / "projects" / f"-{self.project_hash}"
+    async def _get_stdio_adapter(self) -> "StdioACPAdapter":
+        """获取或创建 Stdio ACP 适配器。"""
+        if self._stdio_adapter is None:
+            from iflow_bot.engine.stdio_acp import StdioACPAdapter
+            self._stdio_adapter = StdioACPAdapter(
+                iflow_path=self.iflow_path,
+                workspace=self.workspace,
+                timeout=self.timeout,
+                default_model=self.default_model,
+                thinking=self.thinking,
+            )
+            await self._stdio_adapter.connect()
+            logger.info(f"StdioACP adapter connected")
+        return self._stdio_adapter
 
     def list_iflow_sessions(self) -> list[dict]:
         sessions_dir = self.iflow_sessions_dir
@@ -337,9 +347,12 @@ class IFlowAdapter:
         根据模式选择不同的通信方式：
         - cli: 通过子进程调用 iflow 命令
         - acp: 通过 WebSocket 连接 iflow ACP 服务
+        - stdio: 通过 stdio 直接与 iflow --experimental-acp 通信
         """
         if self.mode == "acp":
             return await self._chat_acp(message, channel, chat_id, model, timeout)
+        elif self.mode == "stdio":
+            return await self._chat_stdio(message, channel, chat_id, model, timeout)
         else:
             return await self._chat_cli(message, channel, chat_id, model, timeout)
     
@@ -401,6 +414,29 @@ class IFlowAdapter:
         
         return response
 
+    async def _chat_stdio(
+        self,
+        message: str,
+        channel: str = "cli",
+        chat_id: str = "direct",
+        model: Optional[str] = None,
+        timeout: Optional[int] = None,
+    ) -> str:
+        """Stdio 模式：通过 stdio 直接与 iflow --experimental-acp 通信。"""
+        adapter = await self._get_stdio_adapter()
+        
+        logger.info(f"Chat (Stdio): {channel}:{chat_id}")
+        
+        response = await adapter.chat(
+            message=message,
+            channel=channel,
+            chat_id=chat_id,
+            model=model or self.default_model,
+            timeout=timeout or self.timeout,
+        )
+        
+        return response
+
     async def chat_stream(
         self,
         message: str,
@@ -413,7 +449,7 @@ class IFlowAdapter:
         """
         发送消息并流式获取响应。
         
-        仅 ACP 模式支持流式输出，CLI 模式会回退到普通 chat。
+        ACP 和 Stdio 模式支持流式输出，CLI 模式会回退到普通 chat。
         
         Args:
             message: 用户消息
@@ -426,17 +462,19 @@ class IFlowAdapter:
         Returns:
             最终响应文本
         """
-        if self.mode == "acp":
-            adapter = await self._get_acp_adapter()
-            
-            logger.info(f"Chat Stream (ACP): {channel}:{chat_id}")
-            
-            from iflow_bot.engine.acp import AgentMessageChunk
+        if self.mode == "acp" or self.mode == "stdio":
+            if self.mode == "acp":
+                adapter = await self._get_acp_adapter()
+                from iflow_bot.engine.acp import AgentMessageChunk
+                logger.info(f"Chat Stream (ACP): {channel}:{chat_id}")
+            else:
+                adapter = await self._get_stdio_adapter()
+                from iflow_bot.engine.stdio_acp import AgentMessageChunk
+                logger.info(f"Chat Stream (Stdio): {channel}:{chat_id}")
             
             chunk_count = 0
             
             async def handle_chunk(chunk: AgentMessageChunk):
-                """处理消息块并发送到渠道。"""
                 nonlocal chunk_count
                 if not chunk.is_thought and chunk.text and on_chunk:
                     chunk_count += 1
@@ -456,7 +494,6 @@ class IFlowAdapter:
             
             return response
         else:
-            # CLI 模式不支持流式，使用普通 chat
             return await self.chat(message, channel, chat_id, model, timeout)
 
     async def new_chat(
@@ -472,6 +509,17 @@ class IFlowAdapter:
             adapter = await self._get_acp_adapter()
             adapter.clear_session(channel, chat_id)
             logger.info(f"Cleared ACP session for {channel}:{chat_id}, starting fresh")
+            return await adapter.new_chat(
+                message=message,
+                channel=channel,
+                chat_id=chat_id,
+                model=model or self.default_model,
+                timeout=timeout or self.timeout,
+            )
+        elif self.mode == "stdio":
+            adapter = await self._get_stdio_adapter()
+            adapter.clear_session(channel, chat_id)
+            logger.info(f"Cleared Stdio session for {channel}:{chat_id}, starting fresh")
             return await adapter.new_chat(
                 message=message,
                 channel=channel,
@@ -512,12 +560,24 @@ class IFlowAdapter:
             except Exception as e:
                 logger.warning(f"Failed to disconnect ACP adapter: {e}")
             self._acp_adapter = None
+        
+        # 断开 Stdio ACP 连接
+        if self._stdio_adapter:
+            try:
+                await self._stdio_adapter.disconnect()
+            except Exception as e:
+                logger.warning(f"Failed to disconnect Stdio adapter: {e}")
+            self._stdio_adapter = None
 
     async def health_check(self) -> bool:
         """检查 iflow 是否可用。"""
         if self.mode == "acp":
             if self._acp_adapter:
                 return await self._acp_adapter.health_check()
+            return False
+        elif self.mode == "stdio":
+            if self._stdio_adapter:
+                return await self._stdio_adapter.health_check()
             return False
         else:
             try:
