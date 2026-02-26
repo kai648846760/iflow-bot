@@ -33,7 +33,8 @@ console = Console()
 __version__ = "0.2.0"
 __logo__ = "🤖"
 
-# Windows: 让 subprocess.run 默认使用 shell=True
+# Windows: 让 subprocess.run 和 asyncio.create_subprocess_exec 默认使用 shell=True
+import asyncio
 import platform
 if platform.system().lower() == "windows":
     _original_run = subprocess.run
@@ -41,6 +42,13 @@ if platform.system().lower() == "windows":
         kwargs.setdefault("shell", True)
         return _original_run(*args, **kwargs)
     subprocess.run = _patched_run
+
+    # 同时 patch asyncio 版本
+    _original_create_subprocess_exec = asyncio.create_subprocess_exec
+    async def _patched_create_subprocess_exec(*args, **kwargs):
+        kwargs.setdefault("shell", True)
+        return await _original_create_subprocess_exec(*args, **kwargs)
+    asyncio.create_subprocess_exec = _patched_create_subprocess_exec
 
 
 # ============================================================================
@@ -559,6 +567,7 @@ async def _start_acp_server(port: int = 8090) -> Optional[asyncio.subprocess.Pro
     Returns:
         成功返回进程对象，复用现有进程返回 None
     """
+    from loguru import logger
     import socket
     
     # 检查端口是否已被占用
