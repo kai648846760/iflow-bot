@@ -1,6 +1,6 @@
 [project]
 name = "iflow-bot"
-version = "0.1.7"
+version = "0.2.0"
 description = "Multi-channel AI Assistant powered by iflow CLI"
 readme = "README.md"
 license = { text = "MIT" }
