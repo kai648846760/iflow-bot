@@ -123,15 +123,21 @@ def ensure_iflow_ready() -> bool:
     """
     # 检查是否安装
     if not check_iflow_installed():
-        console.print("[red]Error: iflow is not installed.[/red]")
+        console.print("[yellow]iflow 未安装，正在自动安装...[/yellow]")
         console.print()
-        console.print("Please install iflow first:")
-        console.print("  [cyan]npm install -g @anthropic-ai/iflow[/cyan]")
-        console.print("  or")
-        console.print("  [cyan]pip install iflow-cli[/cyan]")
-        console.print()
-        console.print("After installation, run: [cyan]iflow login[/cyan]")
-        return False
+        console.print("[cyan]自动安装依赖中...[/cyan]")
+        install_cmd = 'bash -c "$(curl -fsSL https://gitee.com/iflow-ai/iflow-cli/raw/main/install.sh)"'
+        result = subprocess.run(install_cmd, shell=True)
+        if result.returncode != 0:
+            console.print("[red]自动安装失败，请手动执行以下命令:[/red]")
+            console.print(f"  [cyan]{install_cmd}[/cyan]")
+            return False
+
+        # 重新检查是否安装成功
+        if not check_iflow_installed():
+            console.print("[red]安装后仍检测不到 iflow，请检查安装过程[/red]")
+            return False
+        console.print("[green]✓ iflow 安装成功![/green]")
 
     # 检查是否登录
     if not check_iflow_logged_in():
