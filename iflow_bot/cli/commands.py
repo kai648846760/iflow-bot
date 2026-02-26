@@ -33,6 +33,15 @@ console = Console()
 __version__ = "0.2.0"
 __logo__ = "🤖"
 
+# Windows: 让 subprocess.run 默认使用 shell=True
+import platform
+if platform.system().lower() == "windows":
+    _original_run = subprocess.run
+    def _patched_run(*args, **kwargs):
+        kwargs.setdefault("shell", True)
+        return _original_run(*args, **kwargs)
+    subprocess.run = _patched_run
+
 
 # ============================================================================
 # 路径配置
@@ -59,6 +68,44 @@ def get_templates_dir() -> Path:
 # iflow 检查
 # ============================================================================
 
+def _ensure_windows_npm_path() -> None:
+    """确保 Windows 下 npm global bin 路径在 PATH 中"""
+    import os
+    import platform
+
+    if platform.system().lower() != "windows":
+        return
+
+    try:
+        result = subprocess.run(
+            ["npm", "root", "-g"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            shell=True,
+        )
+        npm_global_root = result.stdout.strip()
+        if npm_global_root:
+            # 尝试 bin 目录
+            bin_path = os.path.join(npm_global_root, "bin")
+            if os.path.isdir(bin_path):
+                current_path = os.environ.get("PATH", "")
+                if bin_path not in current_path:
+                    os.environ["PATH"] = bin_path + os.pathsep + current_path
+                return
+            # 也尝试直接路径（Windows 上可能没有 bin 子目录）
+            if os.path.isdir(npm_global_root):
+                current_path = os.environ.get("PATH", "")
+                if npm_global_root not in current_path:
+                    os.environ["PATH"] = npm_global_root + os.pathsep + current_path
+    except Exception:
+        pass
+
+
+# 模块加载时先刷新 Windows PATH
+_ensure_windows_npm_path()
+
+
 def check_iflow_installed() -> bool:
     """检查 iflow 是否已安装。
 
@@ -80,49 +127,7 @@ def check_iflow_installed() -> bool:
         pass
     except Exception:
         pass
-    
-    # Windows 特殊处理：检查 npm 全局包是否已安装
-    import platform
-    if platform.system().lower() == "windows":
-        # 尝试通过 npm 全局包检测
-        try:
-            result = subprocess.run(
-                ["npm", "list", "-g", "--depth=0"],
-                capture_output=True,
-                text=True,
-                timeout=15,
-            )
-            if result.returncode == 0 and "@iflow-ai/iflow-cli" in result.stdout:
-                # 找到了！添加到 PATH
-                try:
-                    result = subprocess.run(
-                        ["npm", "root", "-g"],
-                        capture_output=True,
-                        text=True,
-                        timeout=10,
-                    )
-                    npm_global_root = result.stdout.strip()
-                    if npm_global_root:
-                        import os
-                        bin_path = os.path.join(npm_global_root, "bin")
-                        if os.path.isdir(bin_path):
-                            # 添加到当前进程 PATH 的最前面
-                            current_path = os.environ.get("PATH", "")
-                            if bin_path not in current_path:
-                                os.environ["PATH"] = bin_path + os.pathsep + current_path
-                                # 再次尝试运行 iflow
-                                result = subprocess.run(
-                                    ["iflow", "--version"],
-                                    capture_output=True,
-                                    text=True,
-                                    timeout=10,
-                                )
-                                return result.returncode == 0
-                except Exception:
-                    pass
-        except Exception:
-            pass
-    
+
     return False
 
 
@@ -166,49 +171,60 @@ def ensure_iflow_ready() -> bool:
     Returns:
         True if ready, False otherwise
     """
-    # 检查是否安装
-    if not check_iflow_installed():
-        console.print("[yellow]iflow 未安装，正在自动安装...[/yellow]")
-        console.print()
+    import platform
+    system = platform.system().lower()
 
-        # 检测平台
-        import platform
-        system = platform.system().lower()  # 'darwin', 'linux', 'windows'
+    # Windows: 先刷新 PATH，确保能找到 iflow
+    _ensure_windows_npm_path()
 
-        if system == "windows":
-            # Windows: 直接使用 npm 安装
-            console.print("[cyan]自动安装依赖中...[/cyan]")
-            install_cmd = "npm install -g @iflow-ai/iflow-cli@latest"
-            result = subprocess.run(install_cmd, shell=True)
-            if result.returncode != 0:
-                console.print("[red]自动安装失败，请手动执行以下步骤:[/red]")
-                console.print()
-                console.print("  1. 访问 https://nodejs.org/zh-cn/download 下载最新的 Node.js 安装程序")
-                console.print("  2. 运行安装程序来安装 Node.js")
-                console.print("  3. 重启终端：CMD(Windows + r 输入cmd) 或 PowerShell")
-                console.print("  4. 运行 [cyan]npm install -g @iflow-ai/iflow-cli@latest[/cyan] 来安装 iFlow CLI")
-                console.print("  5. 运行 [cyan]iflow[/cyan] 来启动 iFlow CLI")
-                return False
-        else:
-            # macOS/Linux: 优先使用 bash 脚本，失败则降级 npm
-            console.print("[cyan]自动安装依赖中...[/cyan]")
-            install_cmd = 'bash -c "$(curl -fsSL https://gitee.com/iflow-ai/iflow-cli/raw/main/install.sh)"'
-            result = subprocess.run(install_cmd, shell=True)
-            if result.returncode != 0:
-                # 降级方案：使用 npm
-                console.print("[yellow]一键安装失败，尝试使用 npm 安装...[/yellow]")
-                install_cmd = "npm i -g @iflow-ai/iflow-cli@latest"
-                result = subprocess.run(install_cmd, shell=True)
-                if result.returncode != 0:
-                    console.print("[red]自动安装失败，请手动执行以下命令:[/red]")
-                    console.print(f"  [cyan]{install_cmd}[/cyan]")
-                    return False
-
-        # 重新检查是否安装成功
-        if not check_iflow_installed():
-            console.print("[red]安装后仍检测不到 iflow，请检查安装过程[/red]")
+    # 检查是否已安装
+    if check_iflow_installed():
+        if not check_iflow_logged_in():
+            console.print("[red]Error: iflow is not logged in.[/red]")
+            console.print()
+            console.print("Please login first:")
+            console.print("  [cyan]iflow login[/cyan]")
             return False
-        console.print("[green]✓ iflow 安装成功![/green]")
+        return True
+
+    # 未安装，触发自动安装
+    console.print("[yellow]iflow 未安装，正在自动安装...[/yellow]")
+    console.print()
+
+    if system == "windows":
+        console.print("[cyan]自动安装依赖中...[/cyan]")
+        install_cmd = "npm install -g @iflow-ai/iflow-cli@latest"
+        result = subprocess.run(install_cmd, shell=True)
+
+        if result.returncode != 0:
+            console.print("[red]自动安装失败，请手动执行以下步骤:[/red]")
+            console.print()
+            console.print("  1. 访问 https://nodejs.org/zh-cn/download 下载最新的 Node.js 安装程序")
+            console.print("  2. 运行安装程序来安装 Node.js")
+            console.print("  3. 重启终端：CMD(Windows + r 输入cmd) 或 PowerShell")
+            console.print("  4. 运行 [cyan]npm install -g @iflow-ai/iflow-cli@latest[/cyan] 来安装 iFlow CLI")
+            console.print("  5. 运行 [cyan]iflow[/cyan] 来启动 iFlow CLI")
+            return False
+    else:
+        console.print("[cyan]自动安装依赖中...[/cyan]")
+        install_cmd = 'bash -c "$(curl -fsSL https://gitee.com/iflow-ai/iflow-cli/raw/main/install.sh)"'
+        result = subprocess.run(install_cmd, shell=True)
+        if result.returncode != 0:
+            console.print("[yellow]一键安装失败，尝试使用 npm 安装...[/yellow]")
+            install_cmd = "npm i -g @iflow-ai/iflow-cli@latest"
+            result = subprocess.run(install_cmd, shell=True)
+
+            if result.returncode != 0:
+                console.print("[red]自动安装失败，请手动执行以下命令:[/red]")
+                console.print(f"  [cyan]{install_cmd}[/cyan]")
+                return False
+
+    # 安装后再次刷新 PATH 并检查
+    _ensure_windows_npm_path()
+    if not check_iflow_installed():
+        console.print("[red]安装后仍检测不到 iflow，请检查安装过程[/red]")
+        return False
+    console.print("[green]✓ iflow 安装成功![/green]")
 
     # 检查是否登录
     if not check_iflow_logged_in():
