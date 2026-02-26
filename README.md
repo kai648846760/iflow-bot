@@ -261,7 +261,7 @@ uv run iflow-bot gateway start
 
 **ACP 模式（WebSocket）**：
 - 通过 WebSocket 与 iflow 通信
-- 需要先启动 WebSocket 服务器
+- 需要先启动 WebSocket 服务器[自动启动]
 - 支持实时流式输出
 - 适合需要远程连接的场景
 
