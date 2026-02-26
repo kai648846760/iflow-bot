@@ -72,13 +72,58 @@ def check_iflow_installed() -> bool:
             text=True,
             timeout=10,
         )
-        return result.returncode == 0
+        if result.returncode == 0:
+            return True
     except FileNotFoundError:
-        return False
+        pass
     except subprocess.TimeoutExpired:
-        return False
+        pass
     except Exception:
-        return False
+        pass
+    
+    # Windows 特殊处理：检查 npm 全局包是否已安装
+    import platform
+    if platform.system().lower() == "windows":
+        # 尝试通过 npm 全局包检测
+        try:
+            result = subprocess.run(
+                ["npm", "list", "-g", "--depth=0"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            if result.returncode == 0 and "@iflow-ai/iflow-cli" in result.stdout:
+                # 找到了！添加到 PATH
+                try:
+                    result = subprocess.run(
+                        ["npm", "root", "-g"],
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                    )
+                    npm_global_root = result.stdout.strip()
+                    if npm_global_root:
+                        import os
+                        bin_path = os.path.join(npm_global_root, "bin")
+                        if os.path.isdir(bin_path):
+                            # 添加到当前进程 PATH 的最前面
+                            current_path = os.environ.get("PATH", "")
+                            if bin_path not in current_path:
+                                os.environ["PATH"] = bin_path + os.pathsep + current_path
+                                # 再次尝试运行 iflow
+                                result = subprocess.run(
+                                    ["iflow", "--version"],
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=10,
+                                )
+                                return result.returncode == 0
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    
+    return False
 
 
 def check_iflow_logged_in() -> bool:
