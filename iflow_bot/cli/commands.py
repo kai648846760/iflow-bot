@@ -125,13 +125,39 @@ def ensure_iflow_ready() -> bool:
     if not check_iflow_installed():
         console.print("[yellow]iflow 未安装，正在自动安装...[/yellow]")
         console.print()
-        console.print("[cyan]自动安装依赖中...[/cyan]")
-        install_cmd = 'bash -c "$(curl -fsSL https://gitee.com/iflow-ai/iflow-cli/raw/main/install.sh)"'
-        result = subprocess.run(install_cmd, shell=True)
-        if result.returncode != 0:
-            console.print("[red]自动安装失败，请手动执行以下命令:[/red]")
-            console.print(f"  [cyan]{install_cmd}[/cyan]")
-            return False
+
+        # 检测平台
+        import platform
+        system = platform.system().lower()  # 'darwin', 'linux', 'windows'
+
+        if system == "windows":
+            # Windows: 直接使用 npm 安装
+            console.print("[cyan]自动安装依赖中...[/cyan]")
+            install_cmd = "npm install -g @iflow-ai/iflow-cli@latest"
+            result = subprocess.run(install_cmd, shell=True)
+            if result.returncode != 0:
+                console.print("[red]自动安装失败，请手动执行以下步骤:[/red]")
+                console.print()
+                console.print("  1. 访问 https://nodejs.org/zh-cn/download 下载最新的 Node.js 安装程序")
+                console.print("  2. 运行安装程序来安装 Node.js")
+                console.print("  3. 重启终端：CMD(Windows + r 输入cmd) 或 PowerShell")
+                console.print("  4. 运行 [cyan]npm install -g @iflow-ai/iflow-cli@latest[/cyan] 来安装 iFlow CLI")
+                console.print("  5. 运行 [cyan]iflow[/cyan] 来启动 iFlow CLI")
+                return False
+        else:
+            # macOS/Linux: 优先使用 bash 脚本，失败则降级 npm
+            console.print("[cyan]自动安装依赖中...[/cyan]")
+            install_cmd = 'bash -c "$(curl -fsSL https://gitee.com/iflow-ai/iflow-cli/raw/main/install.sh)"'
+            result = subprocess.run(install_cmd, shell=True)
+            if result.returncode != 0:
+                # 降级方案：使用 npm
+                console.print("[yellow]一键安装失败，尝试使用 npm 安装...[/yellow]")
+                install_cmd = "npm i -g @iflow-ai/iflow-cli@latest"
+                result = subprocess.run(install_cmd, shell=True)
+                if result.returncode != 0:
+                    console.print("[red]自动安装失败，请手动执行以下命令:[/red]")
+                    console.print(f"  [cyan]{install_cmd}[/cyan]")
+                    return False
 
         # 重新检查是否安装成功
         if not check_iflow_installed():
