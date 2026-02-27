@@ -122,6 +122,8 @@ class StdioACPClient:
         self._pending_requests: dict[int, asyncio.Future] = {}
         self._receive_task: Optional[asyncio.Task] = None
         self._message_queue: asyncio.Queue[dict] = asyncio.Queue()
+        self._session_queues: dict[str, asyncio.Queue[dict]] = {}
+        self._prompt_lock = asyncio.Lock()  # 保证请求写入的原子性，以及作为并发回退保障
         
         self._agent_capabilities: dict = {}
         
@@ -225,7 +227,14 @@ class StdioACPClient:
                         if not future.done():
                             future.set_result(message)
                 else:
-                    await self._message_queue.put(message)
+                    # 这是一个通知，根据 sessionId 分发
+                    params = message.get("params", {})
+                    session_id = params.get("sessionId")
+                    if session_id and session_id in self._session_queues:
+                        await self._session_queues[session_id].put(message)
+                    else:
+                        # 如果没有 sessionId 或没有当前监听的 Session，放入全局队列
+                        await self._message_queue.put(message)
                     
             except asyncio.TimeoutError:
                 continue
@@ -428,12 +437,22 @@ class StdioACPClient:
         future: asyncio.Future[dict] = asyncio.get_running_loop().create_future()
         self._pending_requests[request_id] = future
         
+        # 为当前 session 注册专用消息队列
+        session_queue = asyncio.Queue()
+        self._session_queues[session_id] = session_queue
+        
+        async with self._prompt_lock:
+            try:
+                request_str = json.dumps(request) + "\n"
+                self._process.stdin.write(request_str.encode())
+                await self._process.stdin.drain()
+                logger.debug(f"StdioACP prompt sent (session={session_id[:16]}...)")
+            except Exception as e:
+                self._pending_requests.pop(request_id, None)
+                self._session_queues.pop(session_id, None)
+                raise e
+        
         try:
-            request_str = json.dumps(request) + "\n"
-            self._process.stdin.write(request_str.encode())
-            await self._process.stdin.drain()
-            logger.debug(f"StdioACP prompt sent (session={session_id[:16]}...)")
-            
             timeout = timeout or self.timeout
             start_time = asyncio.get_running_loop().time()
             
@@ -446,10 +465,18 @@ class StdioACPClient:
                     if future.done():
                         break
                     
-                    msg = await asyncio.wait_for(
-                        self._message_queue.get(),
-                        timeout=min(remaining, 5.0)
-                    )
+                    # 优先检查自己的私有队列，找不到再看全局队列（Legacy 兼容）
+                    try:
+                        msg = await asyncio.wait_for(
+                            session_queue.get(),
+                            timeout=0.1
+                        )
+                    except asyncio.TimeoutError:
+                        # 尝试从全局队列获取（如果没有 sessionId 字段）
+                        msg = await asyncio.wait_for(
+                            self._message_queue.get(),
+                            timeout=min(remaining, 4.9)
+                        )
                     
                     if msg.get("method") == "session/update":
                         params = msg.get("params", {})
@@ -524,7 +551,13 @@ class StdioACPClient:
             # 避免最后几段内容被丢弃导致消息截断。
             while True:
                 try:
-                    msg = await asyncio.wait_for(self._message_queue.get(), timeout=0.2)
+                    # 同样先 drain 自己的私有队列
+                    try:
+                        msg = await asyncio.wait_for(session_queue.get(), timeout=0.1)
+                    except asyncio.TimeoutError:
+                        # 尝试全局
+                        msg = await asyncio.wait_for(self._message_queue.get(), timeout=0.1)
+                        
                     if msg.get("method") == "session/update":
                         params = msg.get("params", {})
                         update = params.get("update", {})
@@ -538,10 +571,10 @@ class StdioACPClient:
                                     if on_chunk:
                                         await on_chunk(AgentMessageChunk(text=chunk_text))
                 except asyncio.TimeoutError:
-                    break  # 队列已空，退出 drain
-            
+                    break  # 队列已回，退出 drain
+
             final_response = future.result()
-            
+                
             if "error" in final_response:
                 response.error = final_response["error"].get("message", str(final_response["error"]))
                 response.stop_reason = StopReason.ERROR
@@ -567,6 +600,10 @@ class StdioACPClient:
         except Exception as e:
             self._pending_requests.pop(request_id, None)
             raise StdioACPError(f"Prompt error: {e}")
+        finally:
+            # 清理
+            self._session_queues.pop(session_id, None)
+            self._pending_requests.pop(request_id, None)
     
     async def cancel(self, session_id: str) -> None:
         """取消当前请求。"""
