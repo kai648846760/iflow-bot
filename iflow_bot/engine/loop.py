@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 
 
 # 支持流式输出的渠道列表
-STREAMING_CHANNELS = {"telegram", "discord", "slack", "dingtalk"}
+STREAMING_CHANNELS = {"telegram", "discord", "slack", "dingtalk", "qq"}
 
 # 流式输出缓冲区大小范围（字符数）
 STREAM_BUFFER_MIN = 10
@@ -284,22 +284,80 @@ time: {now}
             if dingtalk_channel and hasattr(dingtalk_channel, 'start_streaming'):
                 await dingtalk_channel.start_streaming(msg.chat_id)
             dingtalk_channel = self.channel_manager.get_channel("dingtalk")
+
+        # QQ 使用直接调用方式（流式分段发送）
+        qq_channel = None
+        qq_segment_buffer = ""
+        qq_newline_count = 0
+        qq_in_code_block = False  # 跟踪是否在代码块内（代码块内的换行符不计入阈值）
+        if msg.channel == "qq" and self.channel_manager:
+            qq_channel = self.channel_manager.get_channel("qq")
         
         async def on_chunk(channel: str, chat_id: str, chunk_text: str):
-            """处理流式消息块，基于内容长度缓冲。"""
-            nonlocal unflushed_count, current_threshold
-            
+            """处理流式消息块。
+
+            - QQ 渠道：按换行符精确分段，达到 split_threshold 时立即直接推送一条消息
+            - 其他渠道：基于内容长度缓冲
+            """
+            nonlocal unflushed_count, current_threshold, qq_segment_buffer, qq_newline_count, qq_in_code_block
+
             key = f"{channel}:{chat_id}"
-            
-            # 更新缓冲区
+
+            # 更新累积缓冲区（所有渠道，用于记录完整内容与日志）
             self._stream_buffers[key] = self._stream_buffers.get(key, "") + chunk_text
+
+            # QQ 渠道：按换行符分段直接发送，不走字符缓冲逻辑
+            if channel == "qq" and qq_channel:
+                threshold = getattr(qq_channel.config, "split_threshold", 0)
+                if threshold > 0:
+                    lines = chunk_text.split("\n")
+                    for i, line in enumerate(lines):
+                        is_last_piece = i == len(lines) - 1
+
+                        # 检测代码块分隔符（``` 开头的行），切换代码块状态
+                        # 切换在计数换行符之前：
+                        # - 开头 ```: toggle 到 True 后不计数（代码块内部）
+                        # - 结尾 ```: toggle 到 False 后计数（已离开代码块）
+                        if line.strip().startswith("```"):
+                            qq_in_code_block = not qq_in_code_block
+
+                        if is_last_piece:
+                            qq_segment_buffer += line
+                        else:
+                            qq_segment_buffer += line + "\n"
+                            # 代码块内的换行符不计入阈值
+                            if not qq_in_code_block:
+                                qq_newline_count += 1
+                                if qq_newline_count >= threshold:
+                                    segment = qq_segment_buffer.strip()  # 去除首尾多余空行
+                                    qq_segment_buffer = ""
+                                    qq_newline_count = 0
+                                    if segment:
+                                        await qq_channel.send(OutboundMessage(
+                                            channel=channel,
+                                            chat_id=chat_id,
+                                            content=segment,
+                                            metadata={"reply_to_id": msg.metadata.get("message_id")},
+                                        ))
+                                        # 杯 Bug2：直接调用 Recorder 记录每段已发送的消息
+                                        from iflow_bot.session.recorder import get_recorder
+                                        recorder = get_recorder()
+                                        if recorder:
+                                            recorder.record_outbound(OutboundMessage(
+                                                channel=channel,
+                                                chat_id=chat_id,
+                                                content=segment,
+                                                metadata={"reply_to_id": msg.metadata.get("message_id")},
+                                            ))
+                return  # 不走字符缓冲逻辑
+
             unflushed_count += len(chunk_text)
-            
+
             # 当累积足够字符时发送更新
             if unflushed_count >= current_threshold:
                 unflushed_count = 0
                 current_threshold = random.randint(STREAM_BUFFER_MIN, STREAM_BUFFER_MAX)
-                
+
                 # 钉钉：直接调用渠道的流式方法
                 if channel == "dingtalk" and dingtalk_channel and hasattr(dingtalk_channel, 'handle_streaming_chunk'):
                     await dingtalk_channel.handle_streaming_chunk(chat_id, self._stream_buffers[key], is_final=False)
@@ -328,10 +386,51 @@ time: {now}
             
             # 清理缓冲区并发送最终内容
             final_content = self._stream_buffers.pop(session_key, "")
-            
+
             if final_content:
+                # QQ 渠道：发送剩余内容或完整内容
+                if msg.channel == "qq" and qq_channel:
+                    threshold = getattr(qq_channel.config, "split_threshold", 0)
+                    from iflow_bot.session.recorder import get_recorder
+                    recorder = get_recorder()
+                    if threshold <= 0:
+                        # 不分段：发送完整内容
+                        content_to_send = final_content.strip()
+                        if content_to_send:
+                            await qq_channel.send(OutboundMessage(
+                                channel=msg.channel,
+                                chat_id=msg.chat_id,
+                                content=content_to_send,
+                                metadata={"reply_to_id": msg.metadata.get("message_id")},
+                            ))
+                            # 修复 Bug2：记录完整内容
+                            if recorder:
+                                recorder.record_outbound(OutboundMessage(
+                                    channel=msg.channel,
+                                    chat_id=msg.chat_id,
+                                    content=content_to_send,
+                                    metadata={"reply_to_id": msg.metadata.get("message_id")},
+                                ))
+                    else:
+                        # 分段：发送流式结束时遗留的 buffer
+                        remainder_to_send = qq_segment_buffer.strip()
+                        if remainder_to_send:
+                            await qq_channel.send(OutboundMessage(
+                                channel=msg.channel,
+                                chat_id=msg.chat_id,
+                                content=remainder_to_send,
+                                metadata={"reply_to_id": msg.metadata.get("message_id")},
+                            ))
+                            # 修复 Bug2：记录最后剩余的分段
+                            if recorder:
+                                recorder.record_outbound(OutboundMessage(
+                                    channel=msg.channel,
+                                    chat_id=msg.chat_id,
+                                    content=remainder_to_send,
+                                    metadata={"reply_to_id": msg.metadata.get("message_id")},
+                                ))
                 # 钉钉：直接调用最终更新
-                if msg.channel == "dingtalk" and dingtalk_channel and hasattr(dingtalk_channel, 'handle_streaming_chunk'):
+                elif msg.channel == "dingtalk" and dingtalk_channel and hasattr(dingtalk_channel, 'handle_streaming_chunk'):
                     await dingtalk_channel.handle_streaming_chunk(msg.chat_id, final_content, is_final=True)
                 else:
                     # 其他渠道：通过消息总线

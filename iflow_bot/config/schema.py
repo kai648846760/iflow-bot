@@ -78,6 +78,12 @@ class QQConfig(BaseModel):
     app_id: str = ""
     secret: str = ""
     allow_from: list[str] = Field(default_factory=list)
+    split_threshold: int = 0
+    """流式分段发送阈值（基于换行符数量）。
+
+    - 0: 不分段，等 AI 全部输出完后一次性发送
+    - N > 0: 流式接收时每累积 N 个换行符立即推送一条新 QQ 消息，剩余内容在结束时补发
+    """
 
 
 class EmailConfig(BaseModel):
