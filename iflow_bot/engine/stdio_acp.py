@@ -357,14 +357,22 @@ class StdioACPClient:
         
         if model:
             try:
-                await self._send_request("session/set_config_option", {
+                await self._send_request("session/set_model", {
                     "sessionId": session_id,
-                    "configId": "model",
-                    "value": model,
+                    "modelId": model,
                 }, timeout=10)
                 logger.debug(f"Set model to {model} for session")
             except Exception as e:
-                logger.debug(f"Failed to set model: {e}")
+                logger.warning(f"Failed to set model via session/set_model: {e}, trying set_config_option")
+                try:
+                    await self._send_request("session/set_config_option", {
+                        "sessionId": session_id,
+                        "configId": "model",
+                        "value": model,
+                    }, timeout=10)
+                    logger.debug(f"Set model to {model} via set_config_option")
+                except Exception as e2:
+                    logger.debug(f"Failed to set model via set_config_option: {e2}")
         
         logger.info(f"StdioACP session created: {session_id[:16] if session_id else 'unknown'}...")
         
