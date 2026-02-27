@@ -78,7 +78,7 @@ class QQConfig(BaseModel):
     app_id: str = ""
     secret: str = ""
     allow_from: list[str] = Field(default_factory=list)
-    split_threshold: int = 0
+    split_threshold: int = 3
     """流式分段发送阈值（基于换行符数量）。
 
     - 0: 不分段，等 AI 全部输出完后一次性发送
