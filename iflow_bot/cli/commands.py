@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import platform
 import shutil
 import signal
 import subprocess
@@ -33,22 +34,39 @@ console = Console()
 __version__ = "0.2.0"
 __logo__ = "🤖"
 
-# Windows: 让 subprocess.run 和 asyncio.create_subprocess_exec 默认使用 shell=True
-import asyncio
-import platform
-if platform.system().lower() == "windows":
-    _original_run = subprocess.run
-    def _patched_run(*args, **kwargs):
-        kwargs.setdefault("shell", True)
-        return _original_run(*args, **kwargs)
-    subprocess.run = _patched_run
 
-    # 同时 patch asyncio 版本
-    _original_create_subprocess_exec = asyncio.create_subprocess_exec
-    async def _patched_create_subprocess_exec(*args, **kwargs):
-        kwargs.setdefault("shell", True)
-        return await _original_create_subprocess_exec(*args, **kwargs)
-    asyncio.create_subprocess_exec = _patched_create_subprocess_exec
+def is_windows() -> bool:
+    """检查是否为 Windows 平台。"""
+    return platform.system().lower() == "windows"
+
+
+def process_exists(pid: int) -> bool:
+    """检查进程是否存在（跨平台）。
+    
+    Args:
+        pid: 进程 ID
+        
+    Returns:
+        True 如果进程存在，False 否则
+    """
+    if is_windows():
+        try:
+            result = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                shell=True,
+            )
+            return str(pid) in result.stdout
+        except Exception:
+            return False
+    else:
+        try:
+            os.kill(pid, 0)
+            return True
+        except (ProcessLookupError, PermissionError):
+            return False
 
 
 # ============================================================================
@@ -121,12 +139,14 @@ def check_iflow_installed() -> bool:
         True if installed, False otherwise
     """
     try:
-        result = subprocess.run(
-            ["iflow", "--version"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
+        kwargs = {
+            "capture_output": True,
+            "text": True,
+            "timeout": 10,
+        }
+        if is_windows():
+            kwargs["shell"] = True
+        result = subprocess.run(["iflow", "--version"], **kwargs)
         if result.returncode == 0:
             return True
     except FileNotFoundError:
@@ -447,11 +467,11 @@ def gateway_start(
     if pid_file.exists():
         try:
             pid = int(pid_file.read_text().strip())
-            os.kill(pid, 0)  # 检查进程是否存在
-            console.print(f"[yellow]Gateway already running (PID: {pid})[/yellow]")
-            console.print("Use [cyan]iflow-bot gateway restart[/cyan] to restart")
-            return
-        except (ProcessLookupError, ValueError):
+            if process_exists(pid):
+                console.print(f"[yellow]Gateway already running (PID: {pid})[/yellow]")
+                console.print("Use [cyan]iflow-bot gateway restart[/cyan] to restart")
+                return
+        except ValueError:
             pass
 
     enabled_channels = config.get_enabled_channels()
@@ -529,7 +549,11 @@ def gateway_stop() -> None:
     
     try:
         pid = int(pid_file.read_text().strip())
-        os.kill(pid, signal.SIGTERM)
+        if is_windows():
+            # Windows 上使用 taskkill 终止进程
+            subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True)
+        else:
+            os.kill(pid, signal.SIGTERM)
         console.print(f"[green]✓[/green] Gateway stopped (PID: {pid})")
         pid_file.unlink()
     except ProcessLookupError:
@@ -581,15 +605,25 @@ async def _start_acp_server(port: int = 8090) -> Optional[asyncio.subprocess.Pro
         return None
     
     try:
-        process = await asyncio.create_subprocess_exec(
-            "iflow",
-            "--experimental-acp",
-            "--stream",
-            "--port", str(port),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            start_new_session=True,
-        )
+        if is_windows():
+            # Windows 上使用 shell 启动 iflow 命令，确保 .CMD 文件能被正确执行
+            cmd = f'iflow --experimental-acp --stream --port {port}'
+            process = await asyncio.create_subprocess_shell(
+                cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        else:
+            # Unix 系统使用 exec 方式
+            process = await asyncio.create_subprocess_exec(
+                "iflow",
+                "--experimental-acp",
+                "--stream",
+                "--port", str(port),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
+            )
         
         # 等待服务启动
         await asyncio.sleep(2)
@@ -855,10 +889,12 @@ def status() -> None:
     if pid_file.exists():
         try:
             pid = int(pid_file.read_text().strip())
-            os.kill(pid, 0)
-            console.print(f"  Gateway: [green]运行中[/green] (PID: {pid})")
-        except ProcessLookupError:
-            console.print("  Gateway: [red]已停止[/red] (进程不存在)")
+            if process_exists(pid):
+                console.print(f"  Gateway: [green]运行中[/green] (PID: {pid})")
+            else:
+                console.print("  Gateway: [red]已停止[/red] (进程不存在)")
+        except ValueError:
+            console.print("  Gateway: [red]已停止[/red] (无效 PID)")
     else:
         console.print("  Gateway: [dim]未启动[/dim]")
 
