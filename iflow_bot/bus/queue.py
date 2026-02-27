@@ -64,7 +64,7 @@ class MessageBus:
             return
         
         try:
-            await self._inbound.put(msg)
+            self._inbound.put_nowait(msg)
             logger.debug(f"Published inbound message from {msg.channel}:{msg.chat_id}")
             
             # Record the inbound message
@@ -87,7 +87,7 @@ class MessageBus:
         Raises:
             asyncio.TimeoutError: If timeout is reached.
         """
-        if timeout:
+        if timeout is not None:
             return await asyncio.wait_for(self._inbound.get(), timeout=timeout)
         return await self._inbound.get()
     
@@ -103,7 +103,7 @@ class MessageBus:
             return
         
         try:
-            await self._outbound.put(msg)
+            self._outbound.put_nowait(msg)
             logger.debug(f"Published outbound message to {msg.channel}:{msg.chat_id}")
             
             # Record the outbound message
@@ -126,7 +126,7 @@ class MessageBus:
         Raises:
             asyncio.TimeoutError: If timeout is reached.
         """
-        if timeout:
+        if timeout is not None:
             return await asyncio.wait_for(self._outbound.get(), timeout=timeout)
         return await self._outbound.get()
     

@@ -67,6 +67,9 @@ class AgentLoop:
         # 流式消息缓冲区
         self._stream_buffers: dict[str, str] = {}
         self._stream_tasks: dict[str, asyncio.Task] = {}
+        
+        # P3: 每用户并发锁，确保同一用户的消息串行处理，避免会话状态混乱
+        self._user_locks: dict[str, asyncio.Lock] = {}
 
         logger.info(f"AgentLoop initialized with model={model}, workspace={self.workspace}, streaming={streaming}")
 
@@ -184,71 +187,80 @@ time: {now}
                 logger.error(f"Error in main loop: {e}")
                 await asyncio.sleep(0.1)
 
+    def _get_user_lock(self, channel: str, chat_id: str) -> asyncio.Lock:
+        """获取指定用户的处理锁（P3：防止同一用户并发处理）。"""
+        key = f"{channel}:{chat_id}"
+        if key not in self._user_locks:
+            self._user_locks[key] = asyncio.Lock()
+        return self._user_locks[key]
+
     async def _process_message(self, msg: InboundMessage) -> None:
-        """处理单条消息。"""
-        try:
-            logger.info(f"Processing: {msg.channel}:{msg.chat_id}")
+        """处理单条消息（每用户串行）。"""
+        lock = self._get_user_lock(msg.channel, msg.chat_id)
+        async with lock:
+            try:
+                logger.info(f"Processing: {msg.channel}:{msg.chat_id}")
 
-            # 检查是否是新会话请求（如 /new 命令）
-            if msg.content.strip().lower() in ["/new", "/start"]:
-                # 清除会话映射，开始新对话
-                self.adapter.session_mappings.clear_session(msg.channel, msg.chat_id)
+                # 检查是否是新会话请求（如 /new 命令）
+                if msg.content.strip().lower() in ["/new", "/start"]:
+                    # 清除会话映射，开始新对话
+                    self.adapter.session_mappings.clear_session(msg.channel, msg.chat_id)
+                    await self.bus.publish_outbound(OutboundMessage(
+                        channel=msg.channel,
+                        chat_id=msg.chat_id,
+                        content="✨ 已开始新对话，之前的上下文已清除。",
+                    ))
+                    return
+
+                # 准备消息内容
+                message_content = msg.content
+                
+                # 注入渠道上下文
+                channel_context = self._build_channel_context(msg)
+                if channel_context:
+                    message_content = channel_context + "\n\n" + message_content
+                
+                # 检查引导文件（优先 BOOTSTRAP.md，否则 AGENTS.md）
+                bootstrap_content, is_bootstrap = self._get_bootstrap_content()
+                
+                # 如果有引导内容，注入到消息中
+                if bootstrap_content:
+                    message_content = self._inject_bootstrap(message_content, bootstrap_content, is_bootstrap)
+                    mode = "BOOTSTRAP" if is_bootstrap else "AGENTS"
+                    logger.info(f"Injected {mode} for {msg.channel}:{msg.chat_id}")
+
+                # 检查是否支持流式输出
+                supports_streaming = self.streaming and msg.channel in STREAMING_CHANNELS
+                
+                if supports_streaming:
+                    # 流式模式
+                    response = await self._process_with_streaming(msg, message_content)
+                else:
+                    # 非流式模式
+                    response = await self.adapter.chat(
+                        message=message_content,
+                        channel=msg.channel,
+                        chat_id=msg.chat_id,
+                        model=self.model,
+                    )
+
+                # 发送最终响应（如果有内容且不是流式模式）
+                if response and not supports_streaming:
+                    await self.bus.publish_outbound(OutboundMessage(
+                        channel=msg.channel,
+                        chat_id=msg.chat_id,
+                        content=response,
+                        metadata={"reply_to_id": msg.metadata.get("message_id")},
+                    ))
+                    logger.info(f"Response sent to {msg.channel}:{msg.chat_id}")
+
+            except Exception as e:
+                logger.exception(f"Error processing message for {msg.channel}:{msg.chat_id}")  # B6
                 await self.bus.publish_outbound(OutboundMessage(
                     channel=msg.channel,
                     chat_id=msg.chat_id,
-                    content="✨ 已开始新对话，之前的上下文已清除。",
+                    content=f"❌ 处理消息时出错: {e}",
                 ))
-                return
-
-            # 准备消息内容
-            message_content = msg.content
-            
-            # 注入渠道上下文
-            channel_context = self._build_channel_context(msg)
-            if channel_context:
-                message_content = channel_context + "\n\n" + message_content
-            
-            # 检查引导文件（优先 BOOTSTRAP.md，否则 AGENTS.md）
-            bootstrap_content, is_bootstrap = self._get_bootstrap_content()
-            
-            # 如果有引导内容，注入到消息中
-            if bootstrap_content:
-                message_content = self._inject_bootstrap(message_content, bootstrap_content, is_bootstrap)
-                mode = "BOOTSTRAP" if is_bootstrap else "AGENTS"
-                logger.info(f"Injected {mode} for {msg.channel}:{msg.chat_id}")
-
-            # 检查是否支持流式输出
-            supports_streaming = self.streaming and msg.channel in STREAMING_CHANNELS
-            
-            if supports_streaming:
-                # 流式模式
-                response = await self._process_with_streaming(msg, message_content)
-            else:
-                # 非流式模式
-                response = await self.adapter.chat(
-                    message=message_content,
-                    channel=msg.channel,
-                    chat_id=msg.chat_id,
-                    model=self.model,
-                )
-
-            # 发送最终响应（如果有内容且不是流式模式）
-            if response and not supports_streaming:
-                await self.bus.publish_outbound(OutboundMessage(
-                    channel=msg.channel,
-                    chat_id=msg.chat_id,
-                    content=response,
-                    metadata={"reply_to_id": msg.metadata.get("message_id")},
-                ))
-                logger.info(f"Response sent to {msg.channel}:{msg.chat_id}")
-
-        except Exception as e:
-            logger.error(f"Error processing message: {e}")
-            await self.bus.publish_outbound(OutboundMessage(
-                channel=msg.channel,
-                chat_id=msg.chat_id,
-                content=f"❌ 处理消息时出错: {e}",
-            ))
 
     async def _process_with_streaming(
         self,

@@ -260,7 +260,7 @@ class StdioACPClient:
             "params": params,
         }
         
-        future: asyncio.Future[dict] = asyncio.get_event_loop().create_future()
+        future: asyncio.Future[dict] = asyncio.get_running_loop().create_future()
         self._pending_requests[request_id] = future
         
         try:
@@ -425,7 +425,7 @@ class StdioACPClient:
             },
         }
         
-        future: asyncio.Future[dict] = asyncio.get_event_loop().create_future()
+        future: asyncio.Future[dict] = asyncio.get_running_loop().create_future()
         self._pending_requests[request_id] = future
         
         try:
@@ -435,10 +435,10 @@ class StdioACPClient:
             logger.debug(f"StdioACP prompt sent (session={session_id[:16]}...)")
             
             timeout = timeout or self.timeout
-            start_time = asyncio.get_event_loop().time()
+            start_time = asyncio.get_running_loop().time()
             
             while True:
-                remaining = timeout - (asyncio.get_event_loop().time() - start_time)
+                remaining = timeout - (asyncio.get_running_loop().time() - start_time)
                 if remaining <= 0:
                     raise StdioACPTimeoutError("Prompt timeout")
                 

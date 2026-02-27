@@ -312,7 +312,7 @@ class CronService:
             # Compute next run for recurring jobs
             job.state.next_run_at_ms = _compute_next_run(job.schedule, _now_ms())
         
-        return response if 'response' in dir() else None
+        return response
     
     # ========== Public API ==========
     
