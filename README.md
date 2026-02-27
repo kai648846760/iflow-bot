@@ -1,6 +1,5 @@
 # 🤖 iflow-bot
 
-                   
 ```
 /$$ /$$$$$$$$ /$$                                 /$$$$$$$              /$$    
 |__/| $$_____/| $$                                | $$__  $$            | $$    
@@ -12,71 +11,70 @@
 |__/|__/      |__/ \______/  \_____/\___/         |_______/  \______/    \___/     
 ```
 
+**English** | [中文](README_CN.md)
 
+**Multi-Channel AI Assistant** - A multi-platform messaging bot built on iflow CLI.
 
-**多渠道 AI 助手** - 基于 iflow CLI 构建的多平台消息机器人。
+Extend the powerful AI capabilities of iflow to multiple communication platforms, making AI assistants accessible everywhere.
 
-将 iflow 的强大 AI 能力扩展到多个通讯平台，让 AI 助手无处不在。
+## ✨ Features
 
-## ✨ 特性
+- 🔌 **Multi-Channel Support** - Telegram, Discord, Slack, Feishu, DingTalk, QQ, WhatsApp, Email, Mochat
+- 🧠 **AI-Powered** - Built on iflow CLI, supporting multiple models (GLM-5, Kimi K2.5, MiniMax M2.5, etc.)
+- 💾 **Session Management** - Automatic multi-user session management with conversation context support
+- 📁 **Workspace** - Each bot instance has its own independent workspace and memory system
+- 🔐 **Access Control** - Supports whitelist, mention trigger, and various other policies
+- 🔄 **Thinking Mode** - Optional AI thinking process display
+- ⚡ **Streaming Output** - Real-time streaming output support for Telegram and DingTalk AI Card
+- 🚀 **Stdio Mode** - Direct communication with iflow via stdin/stdout for faster response
 
-- 🔌 **多渠道支持** - Telegram、Discord、Slack、飞书、钉钉、QQ、WhatsApp、Email、Mochat
-- 🧠 **AI 驱动** - 基于 iflow CLI，支持多种模型（GLM-5、Kimi K2.5、MiniMax M2.5 等）
-- 💾 **会话管理** - 自动管理多用户会话，支持对话上下文
-- 📁 **工作空间** - 每个机器人实例拥有独立的工作空间和记忆系统
-- 🔐 **权限控制** - 支持白名单、提及触发等多种策略
-- 🔄 **思考模式** - 可选启用 AI 思考过程展示
-- ⚡ **流式输出** - 支持 Telegram、钉钉 AI Card 实时流式输出
-- 🚀 **Stdio 模式** - 直接通过 stdin/stdout 与 iflow 通信，响应更快
+## 🎬 Demo
 
-## 🎬 演示
+### Telegram Streaming Output
 
-### Telegram 流式输出
+![Telegram Streaming Output Demo](https://github.com/kai648846760/iflow-bot/raw/master/testcase/Lark20260225-200437.gif)
 
-![Telegram 流式输出演示](https://github.com/kai648846760/iflow-bot/raw/master/testcase/Lark20260225-200437.gif)
+### DingTalk AI Card Streaming Output
 
-### 钉钉 AI Card 流式输出
+![DingTalk AI Card Streaming Output Demo](https://github.com/kai648846760/iflow-bot/raw/master/testcase/Lark20260225-200423.gif)
 
-![钉钉 AI Card 流式输出演示](https://github.com/kai648846760/iflow-bot/raw/master/testcase/Lark20260225-200423.gif)
+## 📋 Prerequisites
 
-## 📋 前置要求
+### 1. Install iflow CLI
 
-### 1. 安装 iflow CLI
-
-iflow-bot 依赖 iflow CLI 运行，请先安装：
+iflow-bot depends on iflow CLI. Please install it first:
 
 ```bash
-
-# 已有Node.js 22+
+# With Node.js 22+
 npm i -g @iflow-ai/iflow-cli@latest
 
-# curl 方式
+# Or via curl
 bash -c "$(curl -fsSL https://gitee.com/iflow-ai/iflow-cli/raw/main/install.sh)"
 ```
 
-### 2. 登录 iflow
+### 2. Login to iflow
 
 ```bash
 iflow
 ```
-1. 运行 iflow 后选择 OLogin with iFlow 登录
-2. CLI 会自动打开浏览器跳转到心流平台
-3. 完成注册/登录后授权 iFlow CLI
-4. 自动返回终端，开始使用
+1. After running iflow, select "Login with iFlow"
+2. CLI will automatically open browser to iFlow platform
+3. Complete registration/login and authorize iFlow CLI
+4. Return to terminal automatically and start using
 
-按照提示完成登录流程。
+Follow the prompts to complete the login process.
 
-## 🚀 快速开始
+## 🚀 Quick Start
 
-### 安装
+### Installation
 
-**方式一：pip 安装（推荐）**
+**Option 1: pip install (Recommended)**
 
 ```bash
 pip install iflow-bot
 ```
 
-安装完成后即可直接使用：
+After installation, you can use it directly:
 
 ```bash
 iflow-bot --help
@@ -84,64 +82,64 @@ iflow-bot onboard
 iflow-bot gateway start
 ```
 
-**方式二：从源码安装**
+**Option 2: Install from Source**
 
 ```bash
-# 克隆仓库
+# Clone repository
 git clone https://github.com/your-repo/iflow-bot.git
 cd iflow-bot
 
-# 安装依赖（使用 uv）
+# Install dependencies (using uv)
 uv sync
 ```
 
-### 初始化配置
+### Initialize Configuration
 
 ```bash
-# 创建默认配置文件（pip安装）
+# Create default config file (pip install)
 iflow-bot onboard
 
-# 或源码安装
+# Or from source
 uv run iflow-bot onboard
 
-# 或手动创建
+# Or manually
 mkdir -p ~/.iflow-bot
 cp config.example.json ~/.iflow-bot/config.json
 ```
 
-### 启动服务
+### Start Service
 
-**pip 安装后：**
+**After pip install:**
 
 ```bash
-# 前台运行（调试模式）
+# Foreground (debug mode)
 iflow-bot gateway run
 
-# 后台运行
+# Background
 iflow-bot gateway start
 
-# 查看状态
+# Check status
 iflow-bot status
 
-# 停止服务
+# Stop service
 iflow-bot gateway stop
 ```
 
-**源码安装后：**
+**After source install:**
 
 ```bash
-# 前台运行（调试模式）
+# Foreground (debug mode)
 uv run iflow-bot gateway run
 
-# 后台运行
+# Background
 uv run iflow-bot gateway start
 ```
 
-## ⚙️ 配置说明
+## ⚙️ Configuration
 
-配置文件位于 `~/.iflow-bot/config.json`
+Configuration file located at `~/.iflow-bot/config.json`
 
-### 完整配置示例
+### Full Configuration Example
 
 ```json
 {
@@ -234,43 +232,43 @@ uv run iflow-bot gateway start
 }
 ```
 
-### Driver 配置
+### Driver Configuration
 
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `mode` | string | `"stdio"` | 通信模式：`stdio`（推荐）、`acp`（WebSocket）、`cli`（子进程） |
-| `iflow_path` | string | `"iflow"` | iflow CLI 路径【保持默认即可】 |
-| `model` | string | `"minimax-m2.5"` | 默认模型（glm-5、kimi-k2.5、minimax-m2.5 等） |
-| `yolo` | bool | `true` | 自动确认模式 |
-| `thinking` | bool | `false` | 显示 AI 思考过程 |
-| `max_turns` | int | `40` | 单次最大对话轮次 |
-| `timeout` | int | `300` | 超时时间（秒） |
-| `workspace` | string | `~/.iflow-bot/workspace` | 工作空间路径 |
-| `extra_args` | list | `[]` | 额外的 iflow 参数 |
-| `acp_port` | int | `8090` | ACP 模式下的端口号 |
-| `acp_host` | string | `"localhost"` | ACP 模式下的主机地址 |
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `mode` | string | `"stdio"` | Communication mode: `stdio` (recommended), `acp` (WebSocket), `cli` (subprocess) |
+| `iflow_path` | string | `"iflow"` | iflow CLI path [keep default] |
+| `model` | string | `"minimax-m2.5"` | Default model (glm-5, kimi-k2.5, minimax-m2.5, etc.) |
+| `yolo` | bool | `true` | Auto-confirm mode |
+| `thinking` | bool | `false` | Show AI thinking process |
+| `max_turns` | int | `40` | Maximum conversation turns per session |
+| `timeout` | int | `300` | Timeout in seconds |
+| `workspace` | string | `~/.iflow-bot/workspace` | Workspace path |
+| `extra_args` | list | `[]` | Additional iflow arguments |
+| `acp_port` | int | `8090` | Port for ACP mode |
+| `acp_host` | string | `"localhost"` | Host for ACP mode |
 
-#### 通信模式说明
+#### Communication Modes
 
-**Stdio 模式（⭐ 推荐）**：
-- 直接通过 stdin/stdout 与 iflow 通信
-- 无需启动 WebSocket 服务，启动更快
-- 支持实时流式输出，打字机效果
-- 响应延迟更低，接近原生体验
-- Gateway 启动时自动执行 `iflow --experimental-acp --stream`
+**Stdio Mode (⭐ Recommended)**:
+- Direct communication with iflow via stdin/stdout
+- No need to start WebSocket service, faster startup
+- Real-time streaming output, typewriter effect
+- Lower response latency, close to native experience
+- Gateway automatically executes `iflow --experimental-acp --stream` on startup
 
-**ACP 模式（WebSocket）**：
-- 通过 WebSocket 与 iflow 通信
-- 需要先启动 WebSocket 服务器[自动启动]
-- 支持实时流式输出
-- 适合需要远程连接的场景
+**ACP Mode (WebSocket)**:
+- Communication with iflow via WebSocket
+- Requires starting WebSocket server [auto-started]
+- Real-time streaming output support
+- Suitable for scenarios requiring remote connection
 
-**CLI 模式**：
-- 通过子进程调用 iflow CLI
-- 每次对话独立启动进程
-- 适合简单场景或调试
+**CLI Mode**:
+- Call iflow CLI via subprocess
+- Each conversation starts independent process
+- Suitable for simple scenarios or debugging
 
-#### 推荐配置
+#### Recommended Configuration
 
 ```json
 {
@@ -283,7 +281,7 @@ uv run iflow-bot gateway start
 }
 ```
 
-### 渠道配置
+### Channel Configuration
 
 #### Telegram
 
@@ -297,8 +295,8 @@ uv run iflow-bot gateway start
 }
 ```
 
-1. 在 [@BotFather](https://t.me/BotFather) 创建机器人获取 Token
-2. `allow_from` 为空表示允许所有用户
+1. Create bot at [@BotFather](https://t.me/BotFather) to get Token
+2. Empty `allow_from` allows all users
 
 #### Discord
 
@@ -312,9 +310,9 @@ uv run iflow-bot gateway start
 }
 ```
 
-1. 在 [Discord Developer Portal](https://discord.com/developers/applications) 创建应用
-2. 创建 Bot 用户并获取 Token
-3. 启用 Message Content Intent
+1. Create application at [Discord Developer Portal](https://discord.com/developers/applications)
+2. Create Bot user and get Token
+3. Enable Message Content Intent
 
 #### Slack
 
@@ -330,15 +328,15 @@ uv run iflow-bot gateway start
 }
 ```
 
-1. 在 [Slack API](https://api.slack.com/apps) 创建应用
-2. 创建 Bot 并获取 Bot Token (`xoxb-xxx`)
-3. 启用 Socket Mode 获取 App Token (`xapp-xxx`)
-4. `group_policy` 控制频道消息响应策略：
-   - `mention`: 只响应 @提及
-   - `open`: 响应所有消息
-   - `allowlist`: 只响应白名单频道
+1. Create application at [Slack API](https://api.slack.com/apps)
+2. Create Bot and get Bot Token (`xoxb-xxx`)
+3. Enable Socket Mode to get App Token (`xapp-xxx`)
+4. `group_policy` controls channel message response strategy:
+   - `mention`: Only respond to @mentions
+   - `open`: Respond to all messages
+   - `allowlist`: Only respond to whitelisted channels
 
-#### 飞书 (Feishu/Lark)
+#### Feishu/Lark
 
 ```json
 {
@@ -353,11 +351,11 @@ uv run iflow-bot gateway start
 }
 ```
 
-1. 在 [飞书开放平台](https://open.feishu.cn/) 创建企业自建应用
-2. 启用机器人能力
-3. 配置事件订阅（使用 WebSocket，无需公网 IP）
+1. Create enterprise self-built app at [Feishu Open Platform](https://open.feishu.cn/)
+2. Enable bot capability
+3. Configure event subscription (uses WebSocket, no public IP required)
 
-#### 钉钉 (DingTalk)
+#### DingTalk
 
 ```json
 {
@@ -373,28 +371,28 @@ uv run iflow-bot gateway start
 }
 ```
 
-1. 在 [钉钉开放平台](https://open.dingtalk.com/) 创建机器人
-2. 获取 Client ID 和 Client Secret
-3. 启用 Stream Mode（无需公网 IP）
+1. Create bot at [DingTalk Open Platform](https://open.dingtalk.com/)
+2. Get Client ID and Client Secret
+3. Enable Stream Mode (no public IP required)
 
-**AI Card 流式输出配置**（可选，实现打字机效果）：
+**AI Card Streaming Output Configuration** (optional, for typewriter effect):
 
-| 参数 | 说明 |
-|------|------|
-| `robot_code` | 机器人代码，群聊时需要配置 |
-| `card_template_id` | AI Card 模板 ID，在钉钉开发者后台创建 |
-| `card_template_key` | 模板内容字段名，默认 `content` |
+| Parameter | Description |
+|-----------|-------------|
+| `robot_code` | Robot code, required for group chats |
+| `card_template_id` | AI Card template ID, create in DingTalk developer console |
+| `card_template_key` | Template content field name, default `content` |
 
-**创建 AI Card 模板**：
-1. 登录 [钉钉开发者后台](https://open.dingtalk.com/)
-2. 进入「卡片平台」→「卡片模板」
-3. 创建模板，添加一个「文本」类型的字段
-4. 记录模板 ID 和字段名，配置到 `card_template_id` 和 `card_template_key`
+**Create AI Card Template**:
+1. Login to [DingTalk Developer Console](https://open.dingtalk.com/)
+2. Go to "Card Platform" → "Card Templates"
+3. Create template, add a "Text" type field
+4. Record template ID and field name, configure in `card_template_id` and `card_template_key`
 
-**流式输出效果**：
-- 用户发送消息后，机器人立即回复一张空白卡片
-- 卡片内容实时更新，呈现打字机效果
-- 无需等待完整响应，体验更流畅
+**Streaming Output Effect**:
+- Bot immediately replies with a blank card after user sends message
+- Card content updates in real-time, typewriter effect
+- No need to wait for complete response, smoother experience
 
 #### QQ
 
@@ -409,8 +407,8 @@ uv run iflow-bot gateway start
 }
 ```
 
-1. 在 [QQ 开放平台](https://q.qq.com/) 创建机器人
-2. 获取 App ID 和 Secret
+1. Create bot at [QQ Open Platform](https://q.qq.com/)
+2. Get App ID and Secret
 
 #### WhatsApp
 
@@ -425,7 +423,7 @@ uv run iflow-bot gateway start
 }
 ```
 
-需要部署 [WhatsApp Bridge](https://github.com/your-repo/whatsapp-bridge)（基于 baileys）
+Requires deploying [WhatsApp Bridge](https://github.com/your-repo/whatsapp-bridge) (based on baileys)
 
 #### Email
 
@@ -449,7 +447,7 @@ uv run iflow-bot gateway start
 }
 ```
 
-**重要**: 使用 Gmail 需要创建应用专用密码
+**Important**: Using Gmail requires creating an App Password
 
 #### Mochat
 
@@ -468,205 +466,205 @@ uv run iflow-bot gateway start
 }
 ```
 
-## 🎮 CLI 命令
+## 🎮 CLI Commands
 
-### 基础命令
+### Basic Commands
 
 ```bash
-# 查看版本
+# Show version
 iflow-bot version
 iflow-bot -v
 
-# 查看帮助
+# Show help
 iflow-bot --help
 
-# 查看状态
+# Check status
 iflow-bot status
 
-# 初始化配置
+# Initialize config
 iflow-bot onboard [--force]
 ```
 
-### Gateway 服务管理
+### Gateway Service Management
 
 ```bash
-# 后台启动服务
+# Start service in background
 iflow-bot gateway start
 
-# 前台运行（调试模式）
+# Run in foreground (debug mode)
 iflow-bot gateway run
 
-# 停止服务
+# Stop service
 iflow-bot gateway stop
 
-# 重启服务
+# Restart service
 iflow-bot gateway restart
 ```
 
-### 配置管理
+### Configuration Management
 
 ```bash
-# 显示配置
+# Show config
 iflow-bot config --show
 
-# 编辑配置
+# Edit config
 iflow-bot config -e
 
-# 切换模型
+# Switch model
 iflow-bot model glm-5
 iflow-bot model kimi-k2.5
 iflow-bot model minimax-m2.5
 
-# 思考模式
+# Thinking mode
 iflow-bot thinking on
 iflow-bot thinking off
 ```
 
-### 会话管理
+### Session Management
 
 ```bash
-# 列出所有会话
+# List all sessions
 iflow-bot sessions
 
-# 过滤渠道
+# Filter by channel
 iflow-bot sessions --channel telegram
 
-# 过滤聊天ID
+# Filter by chat ID
 iflow-bot sessions --chat-id 123456
 
-# 清除会话映射
+# Clear session mappings
 iflow-bot sessions --clear
 ```
 
-### 定时任务 (Cron)
+### Scheduled Tasks (Cron)
 
 ```bash
-# 列出任务
+# List tasks
 iflow-bot cron list [-a]
 
-# 添加间隔任务
-iflow-bot cron add -n "喝水提醒" -m "该喝水了！" -e 300 -d --channel telegram --to "123456"
+# Add interval task
+iflow-bot cron add -n "Water reminder" -m "Time to drink water!" -e 300 -d --channel telegram --to "123456"
 
-# 添加一次性任务
-iflow-bot cron add -n "会议提醒" -m "开会！" -a "2024-12-25T10:00:00" -d --channel telegram --to "123456"
+# Add one-time task
+iflow-bot cron add -n "Meeting reminder" -m "Meeting time!" -a "2024-12-25T10:00:00" -d --channel telegram --to "123456"
 
-# 添加 cron 表达式任务
-iflow-bot cron add -n "早报" -m "发送早报" -c "0 9 * * *" -d --channel telegram --to "123456"
+# Add cron expression task
+iflow-bot cron add -n "Morning report" -m "Send morning report" -c "0 9 * * *" -d --channel telegram --to "123456"
 
-# 启用/禁用任务
+# Enable/disable task
 iflow-bot cron enable <id>
 iflow-bot cron disable <id>
 
-# 立即执行任务
+# Run task immediately
 iflow-bot cron run <id>
 
-# 移除任务
+# Remove task
 iflow-bot cron remove <id>
 ```
 
-### iflow 命令透传
+### iflow Command Passthrough
 
 ```bash
-# iflow 基础透传
+# iflow basic passthrough
 iflow-bot iflow --help
 iflow-bot iflow -p "hello"
 
-# MCP 命令
+# MCP commands
 iflow-bot mcp --help
 
-# Agent 命令
+# Agent commands
 iflow-bot agent --help
 
-# Workflow 命令
+# Workflow commands
 iflow-bot workflow --help
 
-# Skill 命令
+# Skill commands
 iflow-bot skill --help
 
-# Commands 命令
+# Commands
 iflow-bot commands --help
 ```
 
-## 📁 目录结构
+## 📁 Directory Structure
 
 ```
 ~/.iflow-bot/
-├── botpy.log                # QQ bot 日志
-├── config.json              # 配置文件
-├── gateway.pid              # PID 文件（后台运行）
-├── gateway.log              # Gateway 日志
-├── session_mappings.json    # Session 会话映射
-├── workspace/               # iflow 工作空间
-│   ├── AGENTS.md            # Agent 行为指南
-│   ├── BOOT.md              # 启动配置
-│   ├── HEARTBEAT.md         # 心跳任务
-│   ├── IDENTITY.md          # 身份标识
-│   ├── SOUL.md              # AI 人格定义
-│   ├── TOOLS.md             # 工具配置
-│   ├── USER.md              # 用户信息
-│   └── memory/              # 记忆目录
-│       └── MEMORY.md        # 长期记忆
-└── data/                    # 数据目录
-    └── cron/                # 定时任务
-        └── jobs.json        # 任务数据
+├── botpy.log                # QQ bot log
+├── config.json              # Configuration file
+├── gateway.pid              # PID file (background mode)
+├── gateway.log              # Gateway log
+├── session_mappings.json    # Session mappings
+├── workspace/               # iflow workspace
+│   ├── AGENTS.md            # Agent behavior guide
+│   ├── BOOT.md              # Boot configuration
+│   ├── HEARTBEAT.md         # Heartbeat tasks
+│   ├── IDENTITY.md          # Identity
+│   ├── SOUL.md              # AI personality definition
+│   ├── TOOLS.md             # Tool configuration
+│   ├── USER.md              # User info
+│   └── memory/              # Memory directory
+│       └── MEMORY.md        # Long-term memory
+└── data/                    # Data directory
+    └── cron/                # Scheduled tasks
+        └── jobs.json        # Task data
 ```
 
-## 🔧 开发
+## 🔧 Development
 
-### 流式输出支持
+### Streaming Output Support
 
-iflow-bot 支持实时流式输出，让用户看到 AI "打字"的过程。
+iflow-bot supports real-time streaming output, allowing users to see AI "typing".
 
-**支持流式输出的渠道**：
-| 渠道 | 流式方式 | 说明 |
-|------|----------|------|
-| Telegram | 编辑消息 | 实时编辑消息内容 |
-| 钉钉 | AI Card | 使用钉钉卡片模板流式更新 |
-| Discord | 编辑消息 | 实时编辑消息内容（计划中） |
-| Slack | 编辑消息 | 实时编辑消息内容（计划中） |
+**Channels with Streaming Support**:
+| Channel | Method | Description |
+|---------|--------|-------------|
+| Telegram | Edit message | Real-time message content editing |
+| DingTalk | AI Card | Streaming update using DingTalk card template |
+| Discord | Edit message | Real-time message content editing (planned) |
+| Slack | Edit message | Real-time message content editing (planned) |
 
-**配置要求**：
-- 需要使用 Stdio 模式（`driver.mode = "stdio"`）或 ACP 模式（`driver.mode = "acp"`）
-- 钉钉需要额外配置 AI Card 模板
+**Configuration Requirements**:
+- Use Stdio mode (`driver.mode = "stdio"`) or ACP mode (`driver.mode = "acp"`)
+- DingTalk requires additional AI Card template configuration
 
-**流式输出缓冲机制**：
-- 内容累积到 10-25 个字符（随机）时推送一次更新
-- 避免过于频繁的 API 调用
-- 确保最终消息包含所有内容
+**Streaming Output Buffer Mechanism**:
+- Push update when content accumulates 10-25 characters (random)
+- Avoid overly frequent API calls
+- Ensure final message contains all content
 
-### Session 会话管理
+### Session Management
 
-iflow-bot 自动管理多用户会话，支持跨渠道对话上下文。
+iflow-bot automatically manages multi-user sessions with cross-channel conversation context support.
 
-**Session 映射存储**：
-- 存储位置：`~/.iflow-bot/session_mappings.json`
-- 格式：`{渠道}:{聊天ID} -> {sessionId}`
+**Session Mapping Storage**:
+- Location: `~/.iflow-bot/session_mappings.json`
+- Format: `{channel}:{chat_id} -> {sessionId}`
 
-**Session 恢复机制**：
-- Gateway 重启后自动恢复会话
-- Session 失效时自动创建新会话
-- 支持通过 CLI 管理会话
+**Session Recovery Mechanism**:
+- Automatically restore sessions after Gateway restart
+- Create new session when session expires
+- Support session management via CLI
 
 ```bash
-# 查看所有会话
+# View all sessions
 iflow-bot sessions
 
-# 清除会话映射
+# Clear session mappings
 iflow-bot sessions --clear
 ```
 
-### 项目结构
+### Project Structure
 
 ```
 iflow-bot/
 ├── iflow_bot/
 │   ├── __init__.py
-│   ├── __main__.py          # 入口点
-│   ├── bus/                 # 消息总线
-│   │   ├── events.py        # 事件定义
-│   │   └── queue.py         # 消息队列
-│   ├── channels/            # 渠道实现
-│   │   ├── base.py          # 基类
+│   ├── __main__.py          # Entry point
+│   ├── bus/                 # Message bus
+│   │   ├── events.py        # Event definitions
+│   │   └── queue.py         # Message queue
+│   ├── channels/            # Channel implementations
+│   │   ├── base.py          # Base class
 │   │   ├── telegram.py
 │   │   ├── discord.py
 │   │   ├── slack.py
@@ -676,56 +674,55 @@ iflow-bot/
 │   │   ├── whatsapp.py
 │   │   ├── email.py
 │   │   ├── mochat.py
-│   │   └── manager.py       # 渠道管理器
-│   ├── cli/                 # CLI 命令
+│   │   └── manager.py       # Channel manager
+│   ├── cli/                 # CLI commands
 │   │   └── commands.py
-│   ├── config/              # 配置管理
-│   │   ├── schema.py        # 配置模型
+│   ├── config/              # Configuration management
+│   │   ├── schema.py        # Configuration model
 │   │   └── loader.py
-│   ├── cron/                # 定时任务
+│   ├── cron/                # Scheduled tasks
 │   │   ├── service.py
 │   │   └── types.py
-│   ├── engine/              # 核心引擎
-│   │   ├── adapter.py       # iflow 适配器
-│   │   ├── acp.py          # ACP 模式（WebSocket）
-│   │   ├── stdio_acp.py    # Stdio 模式
-│   │   └── loop.py          # 消息循环
-│   ├── heartbeat/           # 心跳服务
+│   ├── engine/              # Core engine
+│   │   ├── adapter.py       # iflow adapter
+│   │   ├── acp.py          # ACP mode (WebSocket)
+│   │   ├── stdio_acp.py    # Stdio mode
+│   │   └── loop.py          # Message loop
+│   ├── heartbeat/           # Heartbeat service
 │   │   └── service.py
-│   ├── session/             # 会话管理
+│   ├── session/             # Session management
 │   │   └── manager.py
-│   ├── templates/           # 模板文件
+│   ├── templates/           # Template files
 │   │   ├── AGENTS.md
 │   │   ├── SOUL.md
 │   │   └── ...
-│   └── utils/               # 工具函数
+│   └── utils/               # Utility functions
 │       └── helpers.py
 ├── tests/
 ├── pyproject.toml
 └── README.md
 ```
 
+## 📝 Workspace Templates
 
-## 📝 工作空间模板
+Workspace contains AI's "personality" and memory:
 
-工作空间包含 AI 的"人格"和记忆：
+- **SOUL.md** - Defines AI's core personality and behavior guidelines
+- **USER.md** - User information and preferences
+- **AGENTS.md** - Workspace behavior guide
+- **TOOLS.md** - Available tools and configuration
+- **MEMORY.md** - Long-term memory (important events, decisions)
+- **memory/YYYY-MM-DD.md** - Daily memory logs
 
-- **SOUL.md** - 定义 AI 的核心人格和行为准则
-- **USER.md** - 用户信息和偏好
-- **AGENTS.md** - 工作空间行为指南
-- **TOOLS.md** - 可用工具和配置
-- **MEMORY.md** - 长期记忆（重要事件、决策）
-- **memory/YYYY-MM-DD.md** - 日常记忆日志
+## 🤝 Contributing
 
-## 🤝 贡献
-
-欢迎提交 Issue 和 Pull Request！
+Issues and Pull Requests are welcome!
 
 ## 📄 License
 
 MIT
 
-## 🙏 致谢
+## 🙏 Acknowledgments
 
-- [iflow CLI](https://cli.iflow.cn/) - 强大的 AI Agent CLI
-- [nanobot](https://github.com/HKUDS/nanobot) - 轻量级 AI 机器人框架
+- [iflow CLI](https://cli.iflow.cn/) - Powerful AI Agent CLI
+- [nanobot](https://github.com/HKUDS/nanobot) - Lightweight AI bot framework
