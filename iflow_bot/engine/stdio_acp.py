@@ -519,6 +519,27 @@ class StdioACPClient:
                 if future.done():
                     break
             
+            # 关键修复：future.done() 后，_receive_loop 可能还来得及把最后几个
+            # agent_message_chunk 放入 _message_queue。这里 drain 掉所有残留消息，
+            # 避免最后几段内容被丢弃导致消息截断。
+            while True:
+                try:
+                    msg = await asyncio.wait_for(self._message_queue.get(), timeout=0.2)
+                    if msg.get("method") == "session/update":
+                        params = msg.get("params", {})
+                        update = params.get("update", {})
+                        update_type = update.get("sessionUpdate", "")
+                        if update_type == "agent_message_chunk":
+                            content = update.get("content", {})
+                            if isinstance(content, dict) and content.get("type") == "text":
+                                chunk_text = content.get("text", "")
+                                if chunk_text:
+                                    content_parts.append(chunk_text)
+                                    if on_chunk:
+                                        await on_chunk(AgentMessageChunk(text=chunk_text))
+                except asyncio.TimeoutError:
+                    break  # 队列已空，退出 drain
+            
             final_response = future.result()
             
             if "error" in final_response:
