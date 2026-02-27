@@ -13,12 +13,18 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import platform
 import re
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Literal, Optional
 
 from loguru import logger
+
+
+def _is_windows() -> bool:
+    """检查是否为 Windows 平台。"""
+    return platform.system().lower() == "windows"
 
 
 class IFlowAdapterError(Exception):
@@ -297,12 +303,23 @@ class IFlowAdapter:
         
         logger.debug(f"Running: {' '.join(cmd)} in {self.workspace}")
         
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=str(self.workspace),
-        )
+        if _is_windows():
+            # Windows 上使用 shell 启动命令，确保 .CMD 文件能被正确执行
+            cmd_str = " ".join(f'"{c}"' if " " in c else c for c in cmd)
+            process = await asyncio.create_subprocess_shell(
+                cmd_str,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=str(self.workspace),
+            )
+        else:
+            # Unix 系统使用 exec 方式
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=str(self.workspace),
+            )
         
         self._running_processes[str(id(process))] = process
         
@@ -581,11 +598,19 @@ class IFlowAdapter:
             return False
         else:
             try:
-                process = await asyncio.create_subprocess_exec(
-                    self.iflow_path, "--version",
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
+                if _is_windows():
+                    # Windows 上使用 shell 启动命令
+                    process = await asyncio.create_subprocess_shell(
+                        f'"{self.iflow_path}" --version',
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                else:
+                    process = await asyncio.create_subprocess_exec(
+                        self.iflow_path, "--version",
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
                 await asyncio.wait_for(process.wait(), timeout=10)
                 return process.returncode == 0
             except:

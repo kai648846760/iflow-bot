@@ -177,12 +177,14 @@ def check_iflow_logged_in() -> bool:
             return True
 
         # 尝试运行 iflow 看是否需要登录
-        result = subprocess.run(
-            ["iflow", "-p", "test"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
+        kwargs = {
+            "capture_output": True,
+            "text": True,
+            "timeout": 10,
+        }
+        if is_windows():
+            kwargs["shell"] = True
+        result = subprocess.run(["iflow", "-p", "test"], **kwargs)
         # 如果返回 "Please login first" 或类似提示，说明未登录
         output = result.stdout + result.stderr
         if "login" in output.lower() or "please login" in output.lower():
@@ -1057,6 +1059,18 @@ app.command(name="config")(config_cmd)
 # iflow 命令透传
 # ============================================================================
 
+def _run_iflow_cmd(cmd: list[str], cwd: Optional[Path] = None) -> int:
+    """执行 iflow 命令（跨平台）。"""
+    kwargs = {"cwd": str(cwd) if cwd else None}
+    if is_windows():
+        kwargs["shell"] = True
+        cmd_str = " ".join(f'"{c}"' if " " in c else c for c in cmd)
+        result = subprocess.run(cmd_str, **kwargs)
+    else:
+        result = subprocess.run(cmd, **kwargs)
+    return result.returncode
+
+
 @app.command(name="iflow")
 def iflow_passthrough(
     args: list[str] = typer.Argument(None, help="iflow 命令参数"),
@@ -1068,8 +1082,8 @@ def iflow_passthrough(
     cmd = ["iflow"] + (args or [])
     
     cwd = Path(workspace) if workspace else None
-    result = subprocess.run(cmd, cwd=cwd)
-    raise typer.Exit(result.returncode)
+    returncode = _run_iflow_cmd(cmd, cwd)
+    raise typer.Exit(returncode)
 
 
 # ============================================================================
@@ -1080,40 +1094,40 @@ def iflow_passthrough(
 def mcp_passthrough(args: list[str] = typer.Argument(None)) -> None:
     """透传到 iflow mcp 命令。"""
     cmd = ["iflow", "mcp"] + (args or [])
-    result = subprocess.run(cmd)
-    raise typer.Exit(result.returncode)
+    returncode = _run_iflow_cmd(cmd)
+    raise typer.Exit(returncode)
 
 
 @app.command(name="agent")
 def agent_passthrough(args: list[str] = typer.Argument(None)) -> None:
     """透传到 iflow agent 命令。"""
     cmd = ["iflow", "agent"] + (args or [])
-    result = subprocess.run(cmd)
-    raise typer.Exit(result.returncode)
+    returncode = _run_iflow_cmd(cmd)
+    raise typer.Exit(returncode)
 
 
 @app.command(name="workflow")
 def workflow_passthrough(args: list[str] = typer.Argument(None)) -> None:
     """透传到 iflow workflow 命令。"""
     cmd = ["iflow", "workflow"] + (args or [])
-    result = subprocess.run(cmd)
-    raise typer.Exit(result.returncode)
+    returncode = _run_iflow_cmd(cmd)
+    raise typer.Exit(returncode)
 
 
 @app.command(name="skill")
 def skill_passthrough(args: list[str] = typer.Argument(None)) -> None:
     """透传到 iflow skill 命令。"""
     cmd = ["iflow", "skill"] + (args or [])
-    result = subprocess.run(cmd)
-    raise typer.Exit(result.returncode)
+    returncode = _run_iflow_cmd(cmd)
+    raise typer.Exit(returncode)
 
 
 @app.command(name="commands")
 def commands_passthrough(args: list[str] = typer.Argument(None)) -> None:
     """透传到 iflow commands 命令。"""
     cmd = ["iflow", "commands"] + (args or [])
-    result = subprocess.run(cmd)
-    raise typer.Exit(result.returncode)
+    returncode = _run_iflow_cmd(cmd)
+    raise typer.Exit(returncode)
 
 
 # ============================================================================

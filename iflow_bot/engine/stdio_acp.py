@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import platform
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
@@ -28,6 +29,11 @@ from pathlib import Path
 from typing import Any, Callable, Coroutine, Optional
 
 from loguru import logger
+
+
+def _is_windows() -> bool:
+    """检查是否为 Windows 平台。"""
+    return platform.system().lower() == "windows"
 
 
 class StdioACPError(Exception):
@@ -127,15 +133,27 @@ class StdioACPClient:
             return
         
         try:
-            self._process = await asyncio.create_subprocess_exec(
-                self.iflow_path,
-                "--experimental-acp",
-                "--stream",
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=str(self.workspace),
-            )
+            if _is_windows():
+                # Windows 上使用 shell 启动 iflow 命令，确保 .CMD 文件能被正确执行
+                cmd = f'"{self.iflow_path}" --experimental-acp --stream'
+                self._process = await asyncio.create_subprocess_shell(
+                    cmd,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=str(self.workspace),
+                )
+            else:
+                # Unix 系统使用 exec 方式
+                self._process = await asyncio.create_subprocess_exec(
+                    self.iflow_path,
+                    "--experimental-acp",
+                    "--stream",
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=str(self.workspace),
+                )
             
             self._started = True
             
