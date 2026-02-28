@@ -33,6 +33,7 @@ dependencies = [
     "loguru>=0.7.0",
     "prompt-toolkit>=3.0.0",
     "croniter>=6.0.0",
+    "python-socks[asyncio]>=2.4.3",
 ]
 
 [project.optional-dependencies]
