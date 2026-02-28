@@ -1,4 +1,4 @@
-"""Engine module - IFlow CLI adapter and Agent loop."""
+"""Engine module - IFlow CLI adapter, Agent loop, and analysis tools."""
 
 from iflow_bot.engine.adapter import (
     IFlowAdapter,
@@ -13,6 +13,11 @@ from iflow_bot.engine.acp import (
     ACPConnectionError,
     ACPTimeoutError,
 )
+from iflow_bot.engine.analyzer import (
+    ResultAnalyzer,
+    AnalysisResult,
+    result_analyzer,
+)
 
 __all__ = [
     "IFlowAdapter",
@@ -24,4 +29,7 @@ __all__ = [
     "ACPError",
     "ACPConnectionError",
     "ACPTimeoutError",
+    "ResultAnalyzer",
+    "AnalysisResult",
+    "result_analyzer",
 ]

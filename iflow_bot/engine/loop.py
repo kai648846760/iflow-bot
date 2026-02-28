@@ -9,6 +9,12 @@ BOOTSTRAP 引导机制：
 流式输出支持：
 - ACP 模式下支持实时流式输出到渠道
 - 消息块会实时发送到支持流式的渠道（如 Telegram）
+
+文件回传支持 (from feishu-iflow-bridge)：
+- 使用 ResultAnalyzer 分析 iflow 输出
+- 自动检测输出中生成的文件路径（图片/音频/视频/文档）
+- 通过 OutboundMessage.media 字段将文件附加到响应中
+- 支持文件回传的渠道（如飞书）会自动上传并发送这些文件
 """
 
 from __future__ import annotations
@@ -22,6 +28,7 @@ from loguru import logger
 
 from iflow_bot.bus import MessageBus, InboundMessage, OutboundMessage
 from iflow_bot.engine.adapter import IFlowAdapter
+from iflow_bot.engine.analyzer import result_analyzer, AnalysisResult
 
 if TYPE_CHECKING:
     from iflow_bot.channels.manager import ChannelManager
@@ -43,7 +50,8 @@ class AgentLoop:
     2. 从消息总线获取入站消息
     3. 通过 SessionMappingManager 获取/创建会话 ID
     4. 调用 IFlowAdapter 发送消息到 iflow（支持流式）
-    5. 将响应发布到消息总线
+    5. 使用 ResultAnalyzer 分析响应（检测文件、状态等）
+    6. 将响应和检测到的文件发布到消息总线
     """
 
     def __init__(
@@ -105,27 +113,7 @@ class AgentLoop:
         return None, False
 
     def _inject_bootstrap(self, message: str, bootstrap_content: str, is_bootstrap: bool = True) -> str:
-        """将引导内容注入到消息中。
-        
-        Args:
-            message: 用户消息
-            bootstrap_content: 引导内容
-            is_bootstrap: 是否是 BOOTSTRAP 模式（首次引导）
-        
-        格式（BOOTSTRAP 模式）：
-        [BOOTSTRAP - 首次启动引导 - 必须执行]
-        {bootstrap_content}
-        [/BOOTSTRAP]
-        
-        用户消息: {message}
-        
-        格式（AGENTS 模式）：
-        [AGENTS - 工作空间指南]
-        {agents_content}
-        [/AGENTS]
-        
-        用户消息: {message}
-        """
+        """将引导内容注入到消息中。"""
         if is_bootstrap:
             return f"""[BOOTSTRAP - 首次启动引导 - 必须执行]
 以下是首次启动引导文件，你必须按照其中的指示完成身份设置。
@@ -150,14 +138,7 @@ TOOLS.md - Your Tools（你的工具）定义了你可以使用的工具列表�
 用户消息: {message}"""
 
     def _build_channel_context(self, msg) -> str:
-        """Build channel context for the agent.
-        
-        Args:
-            msg: InboundMessage object
-            
-        Returns:
-            Channel context string
-        """
+        """Build channel context for the agent."""
         from datetime import datetime
         
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -170,6 +151,58 @@ time: {now}
 [/message_source]"""
         
         return context
+
+    def _analyze_and_build_outbound(
+        self,
+        response: str,
+        channel: str,
+        chat_id: str,
+        metadata: Optional[dict] = None,
+    ) -> OutboundMessage:
+        """Analyze response with ResultAnalyzer and build OutboundMessage with media.
+
+        Ported from feishu-iflow-bridge FeishuSender.sendExecutionResult():
+        - Scans iflow output for generated file paths
+        - Categorizes files (image/audio/video/doc)
+        - Attaches detected files via OutboundMessage.media
+
+        Args:
+            response: Raw response text from iflow
+            channel: Target channel name
+            chat_id: Target chat ID
+            metadata: Additional metadata
+
+        Returns:
+            OutboundMessage with content and media attachments
+        """
+        # Analyze the response
+        analysis = result_analyzer.analyze({"output": response, "success": True})
+
+        # Collect all detected files for media attachment
+        media_files: list[str] = []
+        if analysis.image_files:
+            media_files.extend(analysis.image_files)
+            logger.info(f"Detected {len(analysis.image_files)} image(s) in response")
+        if analysis.audio_files:
+            media_files.extend(analysis.audio_files)
+            logger.info(f"Detected {len(analysis.audio_files)} audio file(s) in response")
+        if analysis.video_files:
+            media_files.extend(analysis.video_files)
+            logger.info(f"Detected {len(analysis.video_files)} video file(s) in response")
+        if analysis.doc_files:
+            media_files.extend(analysis.doc_files)
+            logger.info(f"Detected {len(analysis.doc_files)} document(s) in response")
+
+        if media_files:
+            logger.info(f"File callback: attaching {len(media_files)} file(s) to outbound message")
+
+        return OutboundMessage(
+            channel=channel,
+            chat_id=chat_id,
+            content=response,
+            media=media_files,
+            metadata=metadata or {},
+        )
 
     async def run(self) -> None:
         """启动主循环。"""
@@ -246,12 +279,14 @@ time: {now}
 
                 # 发送最终响应（如果有内容且不是流式模式）
                 if response and not supports_streaming:
-                    await self.bus.publish_outbound(OutboundMessage(
+                    # 🆕 使用 ResultAnalyzer 分析响应并提取文件
+                    outbound = self._analyze_and_build_outbound(
+                        response=response,
                         channel=msg.channel,
                         chat_id=msg.chat_id,
-                        content=response,
                         metadata={"reply_to_id": msg.metadata.get("message_id")},
-                    ))
+                    )
+                    await self.bus.publish_outbound(outbound)
                     logger.info(f"Response sent to {msg.channel}:{msg.chat_id}")
 
             except Exception as e:
@@ -307,11 +342,7 @@ time: {now}
             qq_channel = self.channel_manager.get_channel("qq")
         
         async def on_chunk(channel: str, chat_id: str, chunk_text: str):
-            """处理流式消息块。
-
-            - QQ 渠道：按换行符精确分段，达到 split_threshold 时立即直接推送一条消息
-            - 其他渠道：基于内容长度缓冲
-            """
+            """处理流式消息块。"""
             nonlocal unflushed_count, current_threshold, qq_segment_buffer, qq_line_buffer, qq_newline_count, qq_in_code_block
 
             key = f"{channel}:{chat_id}"
@@ -323,14 +354,12 @@ time: {now}
             if channel == "qq" and qq_channel:
                 threshold = getattr(qq_channel.config, "split_threshold", 0)
                 if threshold > 0:
-                    # 使用真正的行级缓冲：把 chunk 先添入 line_buffer
-                    # 再循环提取完整行（以 \n 为的）进行处理
-                    # 这样即使 ``` 被分割到多个 chunk，也能正确检测
                     qq_line_buffer += chunk_text
                     while "\n" in qq_line_buffer:
                         idx = qq_line_buffer.index("\n")
-                        complete_line = qq_line_buffer[:idx]       # 不含 \n
-                        qq_line_buffer = qq_line_buffer[idx + 1:]  # \n 后的剩余
+                        complete_line = qq_line_buffer[:idx]
+
+                        qq_line_buffer = qq_line_buffer[idx + 1:]
 
                         # 检测代码块分隔符
                         if complete_line.strip().startswith("```"):
@@ -400,15 +429,12 @@ time: {now}
             # 清理缓冲区并发送最终内容
             final_content = self._stream_buffers.pop(session_key, "")
 
-            # QQ 渠道：这里必须在 final_content 判断之外呼叫
-            # 原因：如果 _stream_buffers.pop 返回空字符串则 final_content 为 ""，
-            # 但 qq_segment_buffer/qq_line_buffer 里已经有内容，不能被忽略（问题2: 消息卡幻）
+            # QQ 渠道：发送遗留的buffer
             if msg.channel == "qq" and qq_channel:
                 threshold = getattr(qq_channel.config, "split_threshold", 0)
                 from iflow_bot.session.recorder import get_recorder
                 recorder = get_recorder()
                 if threshold <= 0:
-                    # 不分段：发送完整内容
                     content_to_send = final_content.strip()
                     if content_to_send:
                         await qq_channel.send(OutboundMessage(
@@ -425,9 +451,6 @@ time: {now}
                                 metadata={"reply_to_id": msg.metadata.get("message_id")},
                             ))
                 else:
-                    # 分段：发送流式结束时遗留的buffer
-                    # qq_segment_buffer: 已解析的完整行内容
-                    # qq_line_buffer: 最后一行尚未收到 \n 的不完整内容
                     remainder_to_send = (qq_segment_buffer + qq_line_buffer).strip()
                     if remainder_to_send:
                         await qq_channel.send(OutboundMessage(
@@ -445,16 +468,31 @@ time: {now}
                             ))
 
             if final_content:
+                # 🆕 流式结束后，也用 ResultAnalyzer 分析并附加检测到的文件
+                analysis = result_analyzer.analyze({"output": final_content, "success": True})
+                media_files = analysis.image_files + analysis.audio_files + analysis.video_files + analysis.doc_files
+
+                if media_files:
+                    logger.info(f"Stream completed: detected {len(media_files)} file(s) for callback")
+
                 # 钉钉：直接调用最终更新
                 if msg.channel == "dingtalk" and dingtalk_channel and hasattr(dingtalk_channel, 'handle_streaming_chunk'):
                     await dingtalk_channel.handle_streaming_chunk(msg.chat_id, final_content, is_final=True)
+                    # 钉钉流式结束后，单独发送检测到的文件
+                    if media_files:
+                        await self.bus.publish_outbound(OutboundMessage(
+                            channel=msg.channel,
+                            chat_id=msg.chat_id,
+                            content="",
+                            media=media_files,
+                        ))
                 elif msg.channel != "qq":
                     # 其他渠道（非 QQ、非钉钉）：通过消息总线
-                    # QQ 已在上方直接通过 qq_channel.send() 处理，不走 bus，避免重复发送
                     await self.bus.publish_outbound(OutboundMessage(
                         channel=msg.channel,
                         chat_id=msg.chat_id,
                         content=final_content,
+                        media=media_files,
                         metadata={
                             "_progress": True,
                             "_streaming": True,
@@ -488,15 +526,7 @@ time: {now}
         chat_id: str = "direct",
         on_progress: Optional[callable] = None,
     ) -> str:
-        """直接处理消息（CLI 模式 / Cron / Heartbeat）。
-        
-        Args:
-            message: 消息内容
-            session_key: 可选的会话标识（如 "cron:abc123" 或 "heartbeat"）
-            channel: 渠道名称
-            chat_id: 聊天 ID
-            on_progress: 进度回调（可选）
-        """
+        """直接处理消息（CLI 模式 / Cron / Heartbeat）。"""
         # 检查引导文件（优先 BOOTSTRAP.md，否则 AGENTS.md）
         bootstrap_content, is_bootstrap = self._get_bootstrap_content()
         
@@ -506,13 +536,10 @@ time: {now}
             mode = "BOOTSTRAP" if is_bootstrap else "AGENTS"
             logger.info(f"Injected {mode} for {channel}:{chat_id} (direct mode)")
         
-        # 如果提供了 session_key，使用它作为会话标识
-        # 否则使用 channel:chat_id 格式
         effective_channel = channel
         effective_chat_id = chat_id
         
         if session_key:
-            # 解析 session_key 格式（如 "cron:abc123"）
             parts = session_key.split(":", 1)
             if len(parts) == 2:
                 effective_channel = parts[0]

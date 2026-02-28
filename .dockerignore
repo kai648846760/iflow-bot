@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Git
+.git
+.github
+
+# Tests
+tests/
+testcase/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Docs
+参考项目/
+*.md
+!README.md
+!README_CN.md
+
+# Misc
+*.log
+.env
+.env.*
+uv.lock
