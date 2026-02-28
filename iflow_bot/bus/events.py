@@ -57,6 +57,14 @@ class OutboundMessage:
     metadata: dict[str, Any] = field(default_factory=dict)
     """Channel-specific metadata and delivery options"""
     
+    media: list[str] = field(default_factory=list)
+    """List of local file paths to send as media attachments.
+    
+    Channels that support file sending (e.g. Feishu, Telegram) will
+    automatically upload and deliver these files.
+    Ported from feishu-iflow-bridge file callback feature.
+    """
+    
     reply_to_id: Optional[str] = None
     """ID of the message to reply to (if any)"""
     
