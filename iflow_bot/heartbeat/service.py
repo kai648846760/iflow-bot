@@ -53,7 +53,7 @@ class HeartbeatService:
 
     def __init__(
         self,
-        workspace: Path,
+        workspace: Path | str,
         on_heartbeat: Callable[[str], Coroutine[Any, Any, str]] | None = None,
         on_notify: Callable[[str], Coroutine[Any, Any, None]] | None = None,
         interval_s: float = DEFAULT_HEARTBEAT_INTERVAL_S,
@@ -69,7 +69,7 @@ class HeartbeatService:
             interval_s: 心跳间隔（秒），默认 30 分钟
             enabled: 是否启用心跳服务
         """
-        self.workspace = workspace
+        self.workspace = Path(workspace)
         self.on_heartbeat = on_heartbeat
         self.on_notify = on_notify
         self.interval_s = interval_s
