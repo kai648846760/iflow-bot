@@ -1,0 +1,48 @@
+{
+  "driver": {
+    "mode": "stdio",
+    "iflow_path": "iflow",
+    "model": "minimax-m2.5",
+    "yolo": true,
+    "thinking": false,
+    "max_turns": 40,
+    "timeout": 300,
+    "workspace": "/root/.iflow-bot/workspace",
+    "extra_args": []
+  },
+  "channels": {
+    "telegram": {
+      "enabled": false,
+      "token": "YOUR_TELEGRAM_BOT_TOKEN",
+      "allow_from": []
+    },
+    "discord": {
+      "enabled": false,
+      "token": "YOUR_DISCORD_BOT_TOKEN",
+      "allow_from": []
+    },
+    "feishu": {
+      "enabled": false,
+      "app_id": "YOUR_FEISHU_APP_ID",
+      "app_secret": "YOUR_FEISHU_APP_SECRET",
+      "encrypt_key": "",
+      "verification_token": "",
+      "allow_from": []
+    },
+    "dingtalk": {
+      "enabled": false,
+      "client_id": "",
+      "client_secret": "",
+      "allow_from": []
+    },
+    "slack": {
+      "enabled": false,
+      "bot_token": "",
+      "app_token": "",
+      "allow_from": [],
+      "group_policy": "mention"
+    }
+  },
+  "log_level": "INFO",
+  "log_file": ""
+}

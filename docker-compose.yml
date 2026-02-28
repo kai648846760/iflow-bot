@@ -1,0 +1,39 @@
+version: "3.8"
+
+services:
+  iflow-bot:
+    build: .
+    image: iflow-bot:latest
+    container_name: iflow-bot
+    restart: unless-stopped
+    init: true
+
+    volumes:
+      # Mount config file (create config/config.json first)
+      - ./config/config.json:/root/.iflow-bot/config.json:ro
+      # Persistent data
+      - iflow-auth:/root/.iflow           # iflow CLI login credentials
+      - iflow-bot-data:/root/.iflow-bot   # bot workspace, sessions, memory
+
+    environment:
+      # Override config via environment variables (Pydantic-Settings)
+      - IFLOW_BOT__LOG_LEVEL=INFO
+      # - IFLOW_BOT__CHANNELS__TELEGRAM__TOKEN=your_token
+      # - IFLOW_BOT__CHANNELS__TELEGRAM__ENABLED=true
+      # - IFLOW_BOT__CHANNELS__FEISHU__ENABLED=true
+      # - IFLOW_BOT__CHANNELS__FEISHU__APP_ID=cli_xxx
+      # - IFLOW_BOT__CHANNELS__FEISHU__APP_SECRET=xxx
+
+    # Only needed for ACP mode or webhook-based channels
+    # ports:
+    #   - "8090:8090"
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+volumes:
+  iflow-auth:
+  iflow-bot-data:
