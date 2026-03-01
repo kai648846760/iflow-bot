@@ -104,6 +104,10 @@ async def _retry_async(func, *args, max_retries: int = 3, delay: float = 1.0, **
         try:
             return await func(*args, **kwargs)
         except (NetworkError, TimedOut, ConnectionError, OSError) as e:
+            if isinstance(e, NetworkError):
+                if e.message.startswith("Message is not modified:"):
+                    return None
+                
             last_error = e
             if attempt < max_retries - 1:
                 wait_time = delay * (2 ** attempt)  # exponential backoff
