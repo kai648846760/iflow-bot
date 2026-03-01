@@ -90,6 +90,9 @@ class AgentLoop:
             - 否则如果 AGENTS.md 存在，返回 (AGENTS内容, False)
             - 都不存在，返回 (None, False)
         """
+        # stdio/acp 模式下，AGENTS 通过 session system_prompt 注入，避免每条消息重复注入
+        inline_agents = getattr(self.adapter, "mode", "cli") == "cli"
+
         # 优先检查 BOOTSTRAP.md
         bootstrap_file = self.workspace / "BOOTSTRAP.md"
         if bootstrap_file.exists():
@@ -101,14 +104,15 @@ class AgentLoop:
                 logger.error(f"Error reading BOOTSTRAP.md: {e}")
         
         # 否则注入 AGENTS.md
-        agents_file = self.workspace / "AGENTS.md"
-        if agents_file.exists():
-            try:
-                content = agents_file.read_text(encoding="utf-8")
-                logger.debug("AGENTS.md detected - will inject agents context")
-                return content, False
-            except Exception as e:
-                logger.error(f"Error reading AGENTS.md: {e}")
+        if inline_agents:
+            agents_file = self.workspace / "AGENTS.md"
+            if agents_file.exists():
+                try:
+                    content = agents_file.read_text(encoding="utf-8")
+                    logger.debug("AGENTS.md detected - will inject agents context")
+                    return content, False
+                except Exception as e:
+                    logger.error(f"Error reading AGENTS.md: {e}")
         
         return None, False
 

@@ -597,6 +597,9 @@ class StdioACPClient:
         except asyncio.TimeoutError:
             self._pending_requests.pop(request_id, None)
             raise StdioACPTimeoutError("Prompt timeout")
+        except StdioACPTimeoutError:
+            self._pending_requests.pop(request_id, None)
+            raise
         except Exception as e:
             self._pending_requests.pop(request_id, None)
             raise StdioACPError(f"Prompt error: {e}")
@@ -684,6 +687,29 @@ class StdioACPAdapter:
             return session_file
         
         return None
+
+    def _build_session_system_prompt(self) -> Optional[str]:
+        workspace = self.workspace or Path.cwd()
+        agents_file = workspace / "AGENTS.md"
+        if not agents_file.exists():
+            return None
+
+        try:
+            agents_content = agents_file.read_text(encoding="utf-8")
+        except Exception as e:
+            logger.warning(f"Failed to read AGENTS.md for system_prompt: {e}")
+            return None
+
+        return f"""[AGENTS - 工作空间指南]
+以下是当前工作空间的行为指南，请严格遵循。
+
+{agents_content}
+[/AGENTS]
+
+SOUL.md - Who You Are（你的灵魂）定义了你是谁，你的性格、特点、行为准则等核心信息。
+IDENTITY.md - Your Identity（你的身份）定义了你的具体身份信息，如名字、年龄、职业、兴趣爱好等。
+USERY.md - User Identity（用户身份）定义了用户的具体身份信息，如名字、年龄、职业、兴趣爱好等。
+TOOLS.md - Your Tools（你的工具）定义了你可以使用的工具列表，包括每个工具的名称、功能描述、使用方法等, 每次学会一个工具，你便要主动更新该文件。"""
     
     def _extract_conversation_history(self, session_id: str, max_turns: int = 20) -> Optional[str]:
         import datetime
@@ -811,10 +837,12 @@ class StdioACPAdapter:
             if not self._client:
                 raise StdioACPConnectionError("StdioACP client not connected")
             
+            system_prompt = self._build_session_system_prompt()
             session_id = await self._client.create_session(
                 workspace=self.workspace,
                 model=model or self.default_model,
                 approval_mode="yolo",
+                system_prompt=system_prompt,
             )
             
             self._session_map[key] = session_id
@@ -843,12 +871,27 @@ class StdioACPAdapter:
         
         key = self._get_session_key(channel, chat_id)
         session_id = await self._get_or_create_session(channel, chat_id, model)
-        
-        response = await self._client.prompt(
-            session_id=session_id,
-            message=message,
-            timeout=timeout or self.timeout,
-        )
+
+        try:
+            response = await self._client.prompt(
+                session_id=session_id,
+                message=message,
+                timeout=timeout or self.timeout,
+            )
+        except StdioACPTimeoutError:
+            logger.warning(f"Prompt timeout, cancel and recreate session: {key}")
+            try:
+                await self._client.cancel(session_id)
+            except Exception as e:
+                logger.debug(f"Failed to cancel timed-out session {session_id[:16]}...: {e}")
+
+            await self._invalidate_session(key)
+            session_id = await self._create_new_session(key, model)
+            response = await self._client.prompt(
+                session_id=session_id,
+                message=message,
+                timeout=timeout or self.timeout,
+            )
         
         if response.error and "Invalid request" in response.error:
             logger.warning(f"Session invalid, recreating: {key}")
@@ -914,13 +957,31 @@ class StdioACPAdapter:
                 if asyncio.iscoroutine(result):
                     await result
         
-        response = await self._client.prompt(
-            session_id=session_id,
-            message=message,
-            timeout=timeout or self.timeout,
-            on_chunk=handle_chunk,
-            on_tool_call=handle_tool_call,
-        )
+        try:
+            response = await self._client.prompt(
+                session_id=session_id,
+                message=message,
+                timeout=timeout or self.timeout,
+                on_chunk=handle_chunk,
+                on_tool_call=handle_tool_call,
+            )
+        except StdioACPTimeoutError:
+            logger.warning(f"Stream prompt timeout, cancel and recreate session: {key}")
+            try:
+                await self._client.cancel(session_id)
+            except Exception as e:
+                logger.debug(f"Failed to cancel timed-out session {session_id[:16]}...: {e}")
+
+            await self._invalidate_session(key)
+            session_id = await self._create_new_session(key, model)
+            content_parts.clear()
+            response = await self._client.prompt(
+                session_id=session_id,
+                message=message,
+                timeout=timeout or self.timeout,
+                on_chunk=handle_chunk,
+                on_tool_call=handle_tool_call,
+            )
         
         if response.error and "Invalid request" in response.error:
             logger.warning(f"Session invalid (stream), recreating: {key}")
