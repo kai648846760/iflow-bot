@@ -918,7 +918,10 @@ TOOLS.md - Your Tools（你的工具）定义了你可以使用的工具列表�
             )
         
         if response.error:
-            raise StdioACPError(f"Chat error: {response.error}")
+            if "terminated" in response.error.lower() and (response.content or "").strip():
+                logger.warning("Chat returned terminated with content, returning partial content")
+            else:
+                raise StdioACPError(f"Chat error: {response.error}")
         
         if self.thinking and response.thought:
             return f"[Thinking]\n{response.thought}\n\n[Response]\n{response.content}"
@@ -1010,10 +1013,14 @@ TOOLS.md - Your Tools（你的工具）定义了你可以使用的工具列表�
                 on_tool_call=handle_tool_call,
             )
         
+        stream_content = "".join(content_parts) or response.content
         if response.error:
-            raise StdioACPError(f"Chat error: {response.error}")
+            if "terminated" in response.error.lower() and (stream_content or "").strip():
+                logger.warning("Chat stream returned terminated with content, returning partial content")
+            else:
+                raise StdioACPError(f"Chat error: {response.error}")
         
-        return "".join(content_parts) or response.content
+        return stream_content
     
     async def new_chat(
         self,

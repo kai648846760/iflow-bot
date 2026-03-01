@@ -27,12 +27,15 @@ try:
         CreateFileRequestBody,
         CreateImageRequest,
         CreateImageRequestBody,
+        DeleteMessageReactionRequest,
         CreateMessageRequest,
         CreateMessageRequestBody,
         CreateMessageReactionRequest,
         CreateMessageReactionRequestBody,
         Emoji,
         GetMessageResourceRequest,
+        PatchMessageRequest,
+        PatchMessageRequestBody,
         P2ImMessageReceiveV1,
     )
     FEISHU_AVAILABLE = True
@@ -274,6 +277,9 @@ class FeishuChannel(BaseChannel):
         self._ws_thread: Optional[threading.Thread] = None
         self._processed_message_ids: OrderedDict[str, None] = OrderedDict()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._streaming_message_ids: dict[str, str] = {}
+        self._streaming_last_content: dict[str, str] = {}
+        self._typing_reaction_ids: dict[str, str] = {}
 
     async def start(self) -> None:
         """Start the Feishu bot with WebSocket long connection."""
@@ -598,7 +604,7 @@ class FeishuChannel(BaseChannel):
 
     def _send_message_sync(
         self, receive_id_type: str, receive_id: str, msg_type: str, content: str
-    ) -> bool:
+    ) -> Optional[str]:
         """Send a single message (text/image/file/interactive) synchronously."""
         try:
             request = CreateMessageRequest.builder() \
@@ -616,14 +622,99 @@ class FeishuChannel(BaseChannel):
                     f"Failed to send Feishu {msg_type} message: code={response.code}, "
                     f"msg={response.msg}, log_id={response.get_log_id()}"
                 )
-                return False
+                return None
+
+            message_id = None
+            data = getattr(response, "data", None)
+            if data is not None:
+                message_id = getattr(data, "message_id", None)
+                if message_id is None and isinstance(data, dict):
+                    message_id = data.get("message_id")
+
             logger.debug(f"Feishu {msg_type} message sent to {receive_id}")
-            return True
+            return message_id
         except Exception as e:
             logger.error(f"Error sending Feishu {msg_type} message: {e}")
+            return None
+
+    def _patch_message_sync(self, message_id: str, content: str) -> bool:
+        """Patch an existing Feishu message content synchronously."""
+        try:
+            request = PatchMessageRequest.builder() \
+                .message_id(message_id) \
+                .request_body(
+                    PatchMessageRequestBody.builder()
+                    .content(content)
+                    .build()
+                ).build()
+            response = self._client.im.v1.message.patch(request)
+            if not response.success():
+                logger.error(
+                    f"Failed to patch Feishu message: code={response.code}, "
+                    f"msg={response.msg}, log_id={response.get_log_id()}"
+                )
+                return False
+            return True
+        except Exception as e:
+            logger.error(f"Error patching Feishu message {message_id}: {e}")
             return False
 
-    def _add_reaction_sync(self, message_id: str, emoji_type: str) -> None:
+    async def _handle_streaming_message(
+        self, msg: OutboundMessage, receive_id_type: str
+    ) -> None:
+        """Handle Feishu streaming message by create+patch interactive card."""
+        stream_key = msg.chat_id
+        loop = asyncio.get_running_loop()
+
+        if msg.metadata.get("_streaming_end"):
+            source_message_id = msg.metadata.get("reply_to_id")
+            if source_message_id:
+                await self._remove_typing_reaction(source_message_id)
+            self._streaming_message_ids.pop(stream_key, None)
+            self._streaming_last_content.pop(stream_key, None)
+            logger.debug(f"Feishu streaming ended: {stream_key}")
+            return
+
+        content = (msg.content or "").strip()
+        if not content:
+            return
+
+        if self._streaming_last_content.get(stream_key) == content:
+            return
+
+        source_message_id = msg.metadata.get("reply_to_id")
+        if source_message_id:
+            await self._remove_typing_reaction(source_message_id)
+
+        card_content = json.dumps({
+            "config": {"wide_screen_mode": True},
+            "elements": self._build_card_elements(content),
+        }, ensure_ascii=False)
+
+        message_id = self._streaming_message_ids.get(stream_key)
+        if message_id:
+            patched = await loop.run_in_executor(
+                None, self._patch_message_sync, message_id, card_content
+            )
+            if patched:
+                self._streaming_last_content[stream_key] = content
+                logger.debug(f"Feishu streaming patched: {stream_key}")
+                return
+            self._streaming_message_ids.pop(stream_key, None)
+            logger.warning(f"Feishu streaming patch failed, recreating: {stream_key}")
+
+        created_id = await loop.run_in_executor(
+            None, self._send_message_sync,
+            receive_id_type, msg.chat_id, "interactive", card_content
+        )
+        if created_id:
+            self._streaming_message_ids[stream_key] = created_id
+            self._streaming_last_content[stream_key] = content
+            logger.info(f"Feishu streaming placeholder sent: {stream_key}")
+        else:
+            logger.error(f"Feishu streaming placeholder send failed: {stream_key}")
+
+    def _add_reaction_sync(self, message_id: str, emoji_type: str) -> Optional[str]:
         """Sync helper for adding reaction (runs in thread pool)."""
         try:
             request = CreateMessageReactionRequest.builder() \
@@ -638,21 +729,62 @@ class FeishuChannel(BaseChannel):
 
             if not response.success():
                 logger.warning(f"Failed to add reaction: code={response.code}, msg={response.msg}")
-            else:
-                logger.debug(f"Added {emoji_type} reaction to message {message_id}")
+                return None
+
+            reaction_id = None
+            data = getattr(response, "data", None)
+            if data is not None:
+                reaction_id = getattr(data, "reaction_id", None)
+                if reaction_id is None and isinstance(data, dict):
+                    reaction_id = data.get("reaction_id")
+            logger.debug(f"Added {emoji_type} reaction to message {message_id}")
+            return reaction_id
         except Exception as e:
             logger.warning(f"Error adding reaction: {e}")
+            return None
 
-    async def _add_reaction(self, message_id: str, emoji_type: str = "THUMBSUP") -> None:
+    def _delete_reaction_sync(self, message_id: str, reaction_id: str) -> bool:
+        """Sync helper for deleting reaction (runs in thread pool)."""
+        try:
+            request = DeleteMessageReactionRequest.builder() \
+                .message_id(message_id) \
+                .reaction_id(reaction_id) \
+                .build()
+            response = self._client.im.v1.message_reaction.delete(request)
+            if not response.success():
+                logger.warning(
+                    f"Failed to delete reaction: code={response.code}, msg={response.msg}"
+                )
+                return False
+            logger.debug(f"Deleted reaction from message {message_id}")
+            return True
+        except Exception as e:
+            logger.warning(f"Error deleting reaction: {e}")
+            return False
+
+    async def _add_reaction(self, message_id: str, emoji_type: str = "THUMBSUP") -> Optional[str]:
         """Add a reaction emoji to a message (non-blocking).
 
         Common emoji types: THUMBSUP, OK, EYES, DONE, OnIt, HEART
         """
         if not self._client or not Emoji:
+            return None
+
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self._add_reaction_sync, message_id, emoji_type)
+
+    async def _remove_typing_reaction(self, source_message_id: str) -> None:
+        """Remove the pending typing reaction from a source message."""
+        reaction_id = self._typing_reaction_ids.pop(source_message_id, None)
+        if not reaction_id:
             return
 
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, self._add_reaction_sync, message_id, emoji_type)
+        deleted = await loop.run_in_executor(
+            None, self._delete_reaction_sync, source_message_id, reaction_id
+        )
+        if deleted:
+            logger.debug(f"Typing reaction cleared: {source_message_id}")
 
     async def send(self, msg: OutboundMessage) -> None:
         """Send a message through Feishu, including media (images/files) if present.
@@ -674,6 +806,20 @@ class FeishuChannel(BaseChannel):
             # Determine receive_id_type based on chat_id prefix
             receive_id_type = "chat_id" if msg.chat_id.startswith("oc_") else "open_id"
             loop = asyncio.get_running_loop()
+
+            if msg.metadata.get("_streaming") or msg.metadata.get("_streaming_end"):
+                await self._handle_streaming_message(msg, receive_id_type)
+                return
+
+            if msg.metadata.get("_progress"):
+                return
+
+            source_message_id = msg.metadata.get("reply_to_id")
+            if source_message_id:
+                await self._remove_typing_reaction(source_message_id)
+
+            self._streaming_message_ids.pop(msg.chat_id, None)
+            self._streaming_last_content.pop(msg.chat_id, None)
 
             # Handle media files first
             media = getattr(msg, 'media', None) or []
@@ -753,8 +899,10 @@ class FeishuChannel(BaseChannel):
             chat_type = message.chat_type
             msg_type = message.message_type
 
-            # Add reaction to acknowledge message
-            await self._add_reaction(message_id, "THUMBSUP")
+            # 秒回“敲键盘”反应，作为处理中提示
+            typing_reaction_id = await self._add_reaction(message_id, "OnIt")
+            if typing_reaction_id:
+                self._typing_reaction_ids[message_id] = typing_reaction_id
 
             # Parse content
             content_parts: list[str] = []
@@ -799,6 +947,17 @@ class FeishuChannel(BaseChannel):
 
             # Determine reply target: group chat uses chat_id, private uses sender_id
             reply_to = chat_id if chat_type == "group" else sender_id
+
+            logger.info(
+                "Feishu inbound accepted: message_id=%s chat_type=%s msg_type=%s sender=%s reply_to=%s content_len=%d media=%d",
+                message_id,
+                chat_type,
+                msg_type,
+                sender_id,
+                reply_to,
+                len(content),
+                len(media_paths),
+            )
 
             # Forward to message bus
             await self._handle_message(

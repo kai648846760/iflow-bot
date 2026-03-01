@@ -35,7 +35,7 @@ if TYPE_CHECKING:
 
 
 # 支持流式输出的渠道列表
-STREAMING_CHANNELS = {"telegram", "discord", "slack", "dingtalk", "qq"}
+STREAMING_CHANNELS = {"telegram", "discord", "slack", "dingtalk", "qq", "feishu"}
 
 # 流式输出缓冲区大小范围（字符数）
 STREAM_BUFFER_MIN = 10
@@ -237,6 +237,13 @@ time: {now}
         async with lock:
             try:
                 logger.info(f"Processing: {msg.channel}:{msg.chat_id}")
+                logger.info(
+                    "Inbound detail: channel={} chat_id={} sender={} msg_type={}",
+                    msg.channel,
+                    msg.chat_id,
+                    msg.sender_id,
+                    msg.metadata.get("msg_type", ""),
+                )
 
                 # 检查是否是新会话请求（如 /new 命令）
                 if msg.content.strip().lower() in ["/new", "/start"]:
@@ -344,7 +351,7 @@ time: {now}
         qq_in_code_block = False  # 是否在代码块内（代码块内换行符不计入阈值）
         if msg.channel == "qq" and self.channel_manager:
             qq_channel = self.channel_manager.get_channel("qq")
-        
+
         async def on_chunk(channel: str, chat_id: str, chunk_text: str):
             """处理流式消息块。"""
             nonlocal unflushed_count, current_threshold, qq_segment_buffer, qq_line_buffer, qq_newline_count, qq_in_code_block
