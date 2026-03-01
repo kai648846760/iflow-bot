@@ -103,8 +103,14 @@ def _create_default_config(config_path: Path) -> None:
                 "app_token": "",
                 "allow_from": [],
                 "group_policy": "mention",
+                "group_allow_from": [],
                 "reply_in_thread": True,
-                "react_emoji": "eyes"
+                "react_emoji": "eyes",
+                "dm": {
+                    "enabled": True,
+                    "policy": "open",
+                    "allow_from": []
+                }
             },
             "feishu": {
                 "enabled": False,
@@ -124,7 +130,8 @@ def _create_default_config(config_path: Path) -> None:
                 "enabled": False,
                 "app_id": "",
                 "secret": "",
-                "allow_from": []
+                "allow_from": [],
+                "split_threshold": 3
             },
             "whatsapp": {
                 "enabled": False,

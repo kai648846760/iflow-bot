@@ -51,12 +51,23 @@ class FeishuConfig(BaseModel):
 
 class SlackConfig(BaseModel):
     model_config = {"extra": "ignore"}
-    
+
+    class DMConfig(BaseModel):
+        model_config = {"extra": "ignore"}
+
+        enabled: bool = True
+        policy: Literal["open", "allowlist"] = "open"
+        allow_from: list[str] = Field(default_factory=list)
+
     enabled: bool = False
     bot_token: str = ""
     app_token: str = ""
     allow_from: list[str] = Field(default_factory=list)
     group_policy: Literal["mention", "open", "allowlist"] = "mention"
+    group_allow_from: list[str] = Field(default_factory=list)
+    reply_in_thread: bool = True
+    react_emoji: str = "eyes"
+    dm: DMConfig = Field(default_factory=DMConfig)
 
 
 class DingTalkConfig(BaseModel):

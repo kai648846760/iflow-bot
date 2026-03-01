@@ -81,8 +81,8 @@ async def simulate_streaming_chunks(
 # ---------------------------------------------------------------------------
 
 class TestQQConfigSchema:
-    def test_default_split_threshold_is_zero(self):
-        assert QQConfig().split_threshold == 0
+    def test_default_split_threshold_is_three(self):
+        assert QQConfig().split_threshold == 3
 
     def test_custom_split_threshold(self):
         assert QQConfig(split_threshold=2).split_threshold == 2

@@ -265,7 +265,8 @@ class TelegramChannel(BaseChannel):
             reply_params = ReplyParameters(message_id=reply_to_message_id, allow_sending_without_reply=True)
         
         # Send media files
-        for media_path in (msg.metadata.get("media") or []):
+        media_files = msg.media or msg.metadata.get("media") or []
+        for media_path in media_files:
             try:
                 ext = Path(media_path).suffix.lower()
                 if ext in (".jpg", ".jpeg", ".png", ".gif", ".webp"):
