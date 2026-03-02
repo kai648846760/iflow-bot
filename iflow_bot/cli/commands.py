@@ -923,6 +923,32 @@ def status() -> None:
 
 
 # ============================================================================
+# Web Console 命令
+# ============================================================================
+
+@app.command(name="console")
+def console_run(
+    host: str = typer.Option("127.0.0.1", "--host", help="监听地址"),
+    port: int = typer.Option(8787, "--port", help="监听端口"),
+    token: str = typer.Option("", "--token", help="访问令牌（可选）"),
+) -> None:
+    """启动 Web 控制台（纯 Python）。"""
+    try:
+        from iflow_bot.web.server import run_console
+    except Exception as e:
+        console.print(f"[red]Failed to load web console dependencies: {e}[/red]")
+        console.print("[yellow]请安装依赖后重试：pip install fastapi uvicorn jinja2[/yellow]")
+        raise typer.Exit(1)
+
+    access_url = f"http://{host}:{port}"
+    if token:
+        access_url += f"/?token={token}"
+
+    console.print(f"[green]✓[/green] Web 控制台启动中: [cyan]{access_url}[/cyan]")
+    run_console(host=host, port=port, token=token or None)
+
+
+# ============================================================================
 # 模型切换命令
 # ============================================================================
 

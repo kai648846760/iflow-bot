@@ -17,7 +17,7 @@ import platform
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Literal, Optional
+from typing import Any, Callable, Literal, Optional
 
 from loguru import logger
 
@@ -462,6 +462,8 @@ class IFlowAdapter:
         model: Optional[str] = None,
         timeout: Optional[int] = None,
         on_chunk: Optional[Callable] = None,
+        on_tool_call: Optional[Callable] = None,
+        on_event: Optional[Callable] = None,
     ) -> str:
         """
         发送消息并流式获取响应。
@@ -497,6 +499,14 @@ class IFlowAdapter:
                     chunk_count += 1
                     logger.debug(f"Stream chunk #{chunk_count}: {len(chunk.text)} chars")
                     await on_chunk(channel, chat_id, chunk.text)
+
+            async def handle_tool_call(tool_call: Any):
+                if on_tool_call:
+                    await on_tool_call(tool_call)
+
+            async def handle_event(event: dict[str, Any]):
+                if on_event:
+                    await on_event(event)
             
             response = await adapter.chat_stream(
                 message=message,
@@ -505,6 +515,8 @@ class IFlowAdapter:
                 model=model or self.default_model,
                 timeout=timeout or self.timeout,
                 on_chunk=handle_chunk,
+                on_tool_call=handle_tool_call,
+                on_event=handle_event,
             )
             
             logger.info(f"Chat stream completed: {chunk_count} chunks sent")

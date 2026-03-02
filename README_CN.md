@@ -483,6 +483,11 @@ iflow-bot status
 
 # 初始化配置
 iflow-bot onboard [--force]
+
+# 启动 Web 控制台
+iflow-bot console --host 127.0.0.1 --port 8787
+# 可选访问令牌
+iflow-bot console --token your_token
 ```
 
 ### Gateway 服务管理

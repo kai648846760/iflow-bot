@@ -484,6 +484,7 @@ class ACPClient:
         timeout: Optional[int] = None,
         on_chunk: Optional[Callable[[AgentMessageChunk], None]] = None,
         on_tool_call: Optional[Callable[[ToolCall], None]] = None,
+        on_event: Optional[Callable[[dict[str, Any]], Coroutine]] = None,
     ) -> ACPResponse:
         """
         发送消息并获取响应。
@@ -571,6 +572,14 @@ class ACPClient:
                         params = msg.get("params", {})
                         update = params.get("update", {})
                         update_type = update.get("sessionUpdate", "")
+                        if on_event:
+                            await on_event(
+                                {
+                                    "session_id": session_id,
+                                    "update_type": update_type,
+                                    "update": update,
+                                }
+                            )
                         
                         if update_type == "agent_message_chunk":
                             # Agent 消息块 - content 是一个 dict，不是数组
@@ -653,6 +662,14 @@ class ACPClient:
                         params = msg.get("params", {})
                         update = params.get("update", {})
                         update_type = update.get("sessionUpdate", "")
+                        if on_event:
+                            await on_event(
+                                {
+                                    "session_id": session_id,
+                                    "update_type": update_type,
+                                    "update": update,
+                                }
+                            )
                         
                         if update_type == "agent_message_chunk":
                             content = update.get("content", {})
@@ -935,6 +952,20 @@ class ACPAdapter:
     def _get_session_key(self, channel: str, chat_id: str) -> str:
         """获取会话键。"""
         return f"{channel}:{chat_id}"
+
+    @staticmethod
+    def _is_context_overflow_error(error_text: str) -> bool:
+        text = (error_text or "").lower()
+        keywords = [
+            "context",
+            "token",
+            "too long",
+            "max_tokens",
+            "max token",
+            "exceed",
+            "length",
+        ]
+        return any(keyword in text for keyword in keywords)
     
     async def _get_or_create_session(
         self,
@@ -1078,6 +1109,30 @@ class ACPAdapter:
                 message=message,
                 timeout=timeout or self.timeout,
             )
+
+        if response.error and self._is_context_overflow_error(response.error):
+            logger.warning(f"Context overflow suspected, recreating with compact history: {key}")
+            old_session_id = await self._invalidate_session(key)
+            history_context = ""
+            if old_session_id:
+                history_context = self._extract_conversation_history(old_session_id, max_turns=4) or ""
+
+            session_id = await self._create_new_session(key, model)
+            retry_message = message
+            if history_context:
+                user_msg_marker = "用户消息:"
+                if user_msg_marker in retry_message:
+                    idx = retry_message.find(user_msg_marker)
+                    retry_message = retry_message[:idx] + history_context + "\n\n" + retry_message[idx:]
+                else:
+                    retry_message = f"{history_context}\n\n{retry_message}"
+                logger.info("Injected compact conversation history before user message")
+
+            response = await self._client.prompt(
+                session_id=session_id,
+                message=retry_message,
+                timeout=timeout or self.timeout,
+            )
         
         if response.error:
             raise ACPError(f"Chat error: {response.error}")
@@ -1097,6 +1152,7 @@ class ACPAdapter:
         timeout: Optional[int] = None,
         on_chunk: Optional[Callable[[AgentMessageChunk], Coroutine]] = None,
         on_tool_call: Optional[Callable[[ToolCall], Coroutine]] = None,
+        on_event: Optional[Callable[[dict[str, Any]], Coroutine]] = None,
     ) -> str:
         """
         发送消息并流式获取响应。
@@ -1137,13 +1193,20 @@ class ACPAdapter:
                 result = on_tool_call(tool_call)
                 if asyncio.iscoroutine(result):
                     await result
-        
+
+        async def handle_event(event: dict[str, Any]):
+            if on_event:
+                result = on_event(event)
+                if asyncio.iscoroutine(result):
+                    await result
+
         response = await self._client.prompt(
             session_id=session_id,
             message=message,
             timeout=timeout or self.timeout,
             on_chunk=handle_chunk,
             on_tool_call=handle_tool_call,
+            on_event=handle_event,
         )
         
         # 如果 session 失效，自动重建并重试
@@ -1177,13 +1240,52 @@ class ACPAdapter:
                 timeout=timeout or self.timeout,
                 on_chunk=handle_chunk,
                 on_tool_call=handle_tool_call,
+                on_event=handle_event,
             )
         
+        stream_content = "".join(content_parts) or response.content
+
+        should_recover = False
+        if response.error and self._is_context_overflow_error(response.error):
+            should_recover = True
+            logger.warning(f"Context overflow suspected (stream), recreating with compact history: {key}")
+        elif not (stream_content or "").strip():
+            should_recover = True
+            logger.warning(f"Empty stream response detected, recreating with compact history: {key}")
+
+        if should_recover:
+            old_session_id = await self._invalidate_session(key)
+            history_context = ""
+            if old_session_id:
+                history_context = self._extract_conversation_history(old_session_id, max_turns=4) or ""
+
+            session_id = await self._create_new_session(key, model)
+            retry_message = message
+            if history_context:
+                user_msg_marker = "用户消息:"
+                if user_msg_marker in retry_message:
+                    idx = retry_message.find(user_msg_marker)
+                    retry_message = retry_message[:idx] + history_context + "\n\n" + retry_message[idx:]
+                else:
+                    retry_message = f"{history_context}\n\n{retry_message}"
+                logger.info("Injected compact conversation history before user message (stream)")
+
+            content_parts.clear()
+            response = await self._client.prompt(
+                session_id=session_id,
+                message=retry_message,
+                timeout=timeout or self.timeout,
+                on_chunk=handle_chunk,
+                on_tool_call=handle_tool_call,
+                on_event=handle_event,
+            )
+            stream_content = "".join(content_parts) or response.content
+
         if response.error:
             raise ACPError(f"Chat error: {response.error}")
-        
+
         # 返回收集的完整响应
-        return "".join(content_parts) or response.content
+        return stream_content
     
     async def new_chat(
         self,

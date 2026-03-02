@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="grid-cards">
+  <article class="card glass">
+    <h3>启用渠道</h3>
+    <div class="metric">{{ enabled_count }}</div>
+    <p>共 {{ channel_total }} 个可配置渠道</p>
+  </article>
+  <article class="card glass">
+    <h3>Driver</h3>
+    <div class="metric">{{ driver_mode or '-' }}</div>
+    <p>模型：{{ driver_model or '-' }}</p>
+  </article>
+  <article class="card glass">
+    <h3>超时</h3>
+    <div class="metric">{{ driver_timeout }}s</div>
+    <p>think={{ 'on' if driver_think else 'off' }} · yolo={{ 'on' if driver_yolo else 'off' }}</p>
+  </article>
+</section>
+
+<section class="card glass config-shell">
+  <div class="config-head">
+    <div>
+      <h3>配置中心</h3>
+      <p>左侧渠道列表，右侧弹窗编辑字段配置。</p>
+    </div>
+    <div class="config-meta">配置文件：<code>{{ config_path }}</code></div>
+  </div>
+  <div class="config-list">
+    {% for ch in channel_states %}
+    <article class="config-list-item {{ 'on' if ch.enabled else 'off' }}">
+      <div class="config-list-main">
+        <div class="channel-main">
+          <strong>{{ ch.name|upper }}</strong>
+          <div class="muted">{{ '在线' if ch.enabled else '关闭' }}</div>
+        </div>
+        <div class="config-list-actions">
+          <button
+            type="button"
+            class="btn-mini"
+            onclick="openChannelConfigModal('{{ ch.name }}', '{{ '1' if ch.enabled else '0' }}')"
+          >编辑配置</button>
+        </div>
+      </div>
+      <div class="config-list-toggle">
+        <form method="post" action="/config/toggle/{{ ch.name }}{% if token %}?token={{ token }}{% endif %}">
+          <input type="hidden" name="enabled" value="{{ 0 if ch.enabled else 1 }}">
+          <button type="submit" class="btn-mini">{{ '停用' if ch.enabled else '启用' }}</button>
+        </form>
+      </div>
+    </article>
+    <template id="channel-config-template-{{ ch.name }}">
+      <form class="channel-config-form" method="post" action="/config/channel/{{ ch.name }}{% if token %}?token={{ token }}{% endif %}">
+        <div class="field-grid">
+          {% for field in ch.fields %}
+          <label class="field-item">
+            <span>{{ field.label }}</span>
+            {% if field.input_type == 'bool' %}
+            <select name="{{ field.name }}">
+              <option value="1" {{ 'selected' if field.value.lower() == 'true' else '' }}>开启</option>
+              <option value="0" {{ 'selected' if field.value.lower() != 'true' else '' }}>关闭</option>
+            </select>
+            {% elif field.input_type == 'list' %}
+            <textarea name="{{ field.name }}" rows="4" class="field-textarea">{{ field.value }}</textarea>
+            {% elif field.input_type == 'int' %}
+            <input type="number" step="1" name="{{ field.name }}" value="{{ field.value }}">
+            {% elif field.input_type == 'float' %}
+            <input type="number" step="any" name="{{ field.name }}" value="{{ field.value }}">
+            {% elif field.input_type == 'password' %}
+            <input type="password" name="{{ field.name }}" value="{{ field.value }}">
+            {% else %}
+            <input type="text" name="{{ field.name }}" value="{{ field.value }}">
+            {% endif %}
+          </label>
+          {% endfor %}
+        </div>
+        <div class="panel-actions">
+          <button type="submit">保存 {{ ch.name }}</button>
+        </div>
+      </form>
+    </template>
+    {% endfor %}
+  </div>
+  {% if saved %}
+  <div class="alert ok">✅ 配置已保存{% if saved != '1' %}：{{ saved }}{% endif %}</div>
+  {% endif %}
+  {% if error %}
+  <div class="alert bad">❌ {{ error }}</div>
+  {% endif %}
+  <details class="advanced-json">
+    <summary>高级：全量 JSON 编辑</summary>
+    <form method="post" action="/config/save{% if token %}?token={{ token }}{% endif %}">
+      <div class="config-editor-head">
+        <strong>JSON 编辑器</strong>
+        <span class="muted">建议：先“校验配置”再保存</span>
+      </div>
+      <textarea id="config-editor" name="content">{{ config_text }}</textarea>
+      <div class="actions actions-strong">
+        <button type="button" onclick="validateConfig('{{ token }}')">校验配置</button>
+        <button type="submit">保存配置</button>
+      </div>
+      <div id="validate-result" class="validate-result"></div>
+    </form>
+  </details>
+</section>
+
+<div id="channel-config-modal" class="modal-shell hidden" onclick="closeChannelConfigModal(event)">
+  <aside class="modal-panel" onclick="event.stopPropagation()">
+    <div class="modal-head">
+      <h4 id="channel-config-modal-title">渠道配置</h4>
+      <button type="button" class="btn-mini" onclick="closeChannelConfigModal()">关闭</button>
+    </div>
+    <div id="channel-config-modal-meta" class="muted"></div>
+    <div id="channel-config-modal-body"></div>
+  </aside>
+</div>
+{% endblock %}

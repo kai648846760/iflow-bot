@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card glass">
+  <h3>全渠道对话</h3>
+  <form method="get" class="filters">
+    {% if token %}<input type="hidden" name="token" value="{{ token }}">{% endif %}
+    <select name="channel">
+      <option value="">全部渠道</option>
+      {% for name in channel_names %}
+      <option value="{{ name }}" {{ 'selected' if channel == name else '' }}>{{ name }}</option>
+      {% endfor %}
+    </select>
+    <input type="text" name="keyword" placeholder="搜索 chat_id 或最后消息..." value="{{ keyword }}">
+    <button type="submit">筛选</button>
+  </form>
+  <table class="table">
+    <thead>
+      <tr><th>渠道</th><th>Chat ID</th><th>消息数</th><th>最后时间</th><th>最后消息</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for item in items %}
+      <tr>
+        <td><span class="tag">{{ item.channel }}</span></td>
+        <td>{{ item.chat_id }}</td>
+        <td>{{ item.message_count }}</td>
+        <td>{{ item.last_timestamp }}</td>
+        <td>{{ item.last_content }}</td>
+        <td class="action-cell"><a class="btn-mini action-btn" href="/conversations/{{ item.channel }}/{{ item.file_name }}{% if token %}?token={{ token }}{% endif %}">查看</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

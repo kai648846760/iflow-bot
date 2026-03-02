@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card glass">
+  <h3>实时日志</h3>
+  <form method="get" class="filters logs-filters">
+    {% if token %}<input type="hidden" name="token" value="{{ token }}">{% endif %}
+    <select name="source" class="compact-select">
+      <option value="gateway" {{ 'selected' if source == 'gateway' else '' }}>Gateway 日志</option>
+      <option value="web" {{ 'selected' if source == 'web' else '' }}>Web 控制台日志</option>
+      <option value="all" {{ 'selected' if source == 'all' else '' }}>全部日志</option>
+    </select>
+    <input type="text" name="keyword" class="logs-keyword" placeholder="筛选关键字..." value="{{ keyword }}">
+    <label class="switch-wrap switch-compact">
+      <input id="logs-auto-follow" type="checkbox" name="auto" value="1" {{ 'checked' if auto else '' }}>
+      <span>自动跟随</span>
+    </label>
+    <button type="submit" class="btn-mini">筛选</button>
+    <button type="button" class="btn-mini" onclick="window.location.reload()">刷新</button>
+  </form>
+  <pre
+    id="live-logs"
+    class="logs"
+    data-token="{{ token }}"
+    data-source="{{ source }}"
+    data-keyword="{{ keyword }}"
+    data-auto="{{ '1' if auto else '0' }}"
+    data-cursor="{{ cursor }}"
+  >{% for line in lines %}{{ line }}
+{% endfor %}</pre>
+  <div class="validate-result">当前来源：{{ source }} · 支持 Web 与 Gateway 双日志源</div>
+</section>
+{% endblock %}

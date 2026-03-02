@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card glass">
+  <h3>对话详情</h3>
+  <p>渠道：<strong>{{ detail.channel }}</strong> · Chat ID：<strong>{{ detail.chat_id }}</strong></p>
+  <div class="chat-scroll">
+    {% for msg in detail.messages %}
+    <div class="bubble {{ 'user' if msg.role == 'user' else 'assistant' }}">
+      <div class="meta">{{ msg.timestamp }} · {{ msg.role }}</div>
+      <pre>{{ msg.content }}</pre>
+    </div>
+    {% endfor %}
+  </div>
+  <div class="backline">
+    <a class="btn-mini" href="/conversations{% if token %}?token={{ token }}{% endif %}">返回会话列表</a>
+  </div>
+</section>
+{% endblock %}
+

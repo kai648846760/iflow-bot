@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="grid-cards">
+  <article class="card glass">
+    <h3>Gateway 状态</h3>
+    <div class="metric {{ 'ok' if gateway.running else 'bad' }}">
+      {{ '运行中' if gateway.running else '已停止' }}
+    </div>
+    <p>PID: {{ gateway.pid or '-' }}</p>
+  </article>
+  <article class="card glass">
+    <h3>会话总数</h3>
+    <div class="metric">{{ conversation_total }}</div>
+    <p>覆盖所有渠道</p>
+  </article>
+  <article class="card glass">
+    <h3>消息总量</h3>
+    <div class="metric">{{ message_total }}</div>
+    <p>按 recorder 数据聚合</p>
+  </article>
+</section>
+
+<section class="card glass">
+  <h3>渠道概览</h3>
+  <table class="table">
+    <thead><tr><th>渠道</th><th>会话数</th><th>消息数</th></tr></thead>
+    <tbody>
+      {% for ch in channels %}
+      <tr>
+        <td>{{ ch.name }}</td>
+        <td>{{ ch.conversation_count }}</td>
+        <td>{{ ch.message_count }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="card glass">
+  <h3>最近错误</h3>
+  <pre class="logs">{% for line in errors %}{{ line }}
+{% endfor %}</pre>
+</section>
+{% endblock %}
+

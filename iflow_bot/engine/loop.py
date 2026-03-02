@@ -521,6 +521,18 @@ time: {now}
                         },
                     ))
                 logger.info(f"Streaming response completed for {msg.channel}:{msg.chat_id}")
+            else:
+                fallback = (
+                    "⚠️ 本轮未产出可见文本（可能会话上下文过长）。"
+                    "我已自动尝试恢复，如仍失败请发送 /new 开启新会话。"
+                )
+                await self.bus.publish_outbound(OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=fallback,
+                    metadata={"reply_to_id": msg.metadata.get("message_id")},
+                ))
+                logger.warning(f"Streaming produced empty output for {msg.channel}:{msg.chat_id}")
             
             return final_content or response
             

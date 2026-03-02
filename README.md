@@ -483,6 +483,11 @@ iflow-bot status
 
 # Initialize config
 iflow-bot onboard [--force]
+
+# Start web console
+iflow-bot console --host 127.0.0.1 --port 8787
+# Optional access token
+iflow-bot console --token your_token
 ```
 
 ### Gateway Service Management
