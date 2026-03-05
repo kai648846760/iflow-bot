@@ -123,6 +123,7 @@ class StdioACPClient:
         self._request_id = 0
         self._pending_requests: dict[int, asyncio.Future] = {}
         self._receive_task: Optional[asyncio.Task] = None
+        self._stderr_receive_task: Optional[asyncio.Task] = None  # 持续读取 stderr 防止缓冲区满导致死锁
         self._message_queue: asyncio.Queue[dict] = asyncio.Queue()
         self._session_queues: dict[str, asyncio.Queue[dict]] = {}
         self._prompt_lock = asyncio.Lock()  # 保证请求写入的原子性，以及作为并发回退保障
@@ -162,6 +163,7 @@ class StdioACPClient:
             self._started = True
             
             self._receive_task = asyncio.create_task(self._receive_loop())
+            self._stderr_receive_task = asyncio.create_task(self._stderr_receive_loop())
             
             logger.info(f"StdioACP started: pid={self._process.pid}")
             
@@ -179,6 +181,14 @@ class StdioACPClient:
             except asyncio.CancelledError:
                 pass
             self._receive_task = None
+        
+        if self._stderr_receive_task:
+            self._stderr_receive_task.cancel()
+            try:
+                await self._stderr_receive_task
+            except asyncio.CancelledError:
+                pass
+            self._stderr_receive_task = None
         
         if self._process:
             try:
@@ -247,6 +257,33 @@ class StdioACPClient:
                 break
         
         logger.debug("StdioACP receive loop ended")
+    
+    async def _stderr_receive_loop(self) -> None:
+        """stderr 接收循环 - 持续读取 stderr 防止缓冲区满导致进程阻塞。"""
+        while self._started and self._process and self._process.stderr:
+            try:
+                line = await asyncio.wait_for(
+                    self._process.stderr.readline(),
+                    timeout=1.0
+                )
+                
+                if not line:
+                    break
+                
+                raw = line.decode("utf-8", errors="replace").strip()
+                
+                if raw:
+                    logger.debug(f"iflow stderr: {raw[:200]}")
+                    
+            except asyncio.TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.debug(f"StdioACP stderr receive error: {e}")
+                break
+        
+        logger.debug("StdioACP stderr receive loop ended")
     
     def _next_request_id(self) -> int:
         self._request_id += 1
