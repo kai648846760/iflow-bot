@@ -21,6 +21,7 @@ import shutil
 import signal
 import subprocess
 import sys
+from importlib.metadata import PackageNotFoundError, version as pkg_version
 from datetime import datetime
 from pathlib import Path
 import re
@@ -71,7 +72,19 @@ def _read_version_from_pyproject() -> str:
     return "0.0.0"
 
 
-__version__ = _read_version_from_pyproject()
+def _resolve_version() -> str:
+    """Resolve version for both installed and source-run scenarios."""
+    try:
+        return pkg_version("iflow-bot")
+    except PackageNotFoundError:
+        pass
+    except Exception:
+        pass
+
+    return _read_version_from_pyproject()
+
+
+__version__ = _resolve_version()
 
 
 def is_windows() -> bool:
