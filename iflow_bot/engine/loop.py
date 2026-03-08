@@ -247,8 +247,28 @@ time: {now}
 
                 # 检查是否是新会话请求（如 /new 命令）
                 if msg.content.strip().lower() in ["/new", "/start"]:
-                    # 清除会话映射，开始新对话
-                    self.adapter.session_mappings.clear_session(msg.channel, msg.chat_id)
+                    cleared = False
+                    try:
+                        if getattr(self.adapter, "mode", "cli") in {"stdio", "acp"}:
+                            # 走底层 adapter，确保真实会话状态（session_map / loaded / rehydrate）一起清理
+                            if self.adapter.mode == "stdio":
+                                stdio_adapter = await self.adapter._get_stdio_adapter()
+                                cleared = stdio_adapter.clear_session(msg.channel, msg.chat_id)
+                            else:
+                                acp_adapter = await self.adapter._get_acp_adapter()
+                                cleared = acp_adapter.clear_session(msg.channel, msg.chat_id)
+                        else:
+                            cleared = self.adapter.session_mappings.clear_session(msg.channel, msg.chat_id)
+                    except Exception as e:
+                        logger.warning(f"Failed to clear session for {msg.channel}:{msg.chat_id}: {e}")
+
+                    logger.info(
+                        "New chat requested: channel=%s chat_id=%s mode=%s cleared=%s",
+                        msg.channel,
+                        msg.chat_id,
+                        getattr(self.adapter, "mode", "unknown"),
+                        cleared,
+                    )
                     await self.bus.publish_outbound(OutboundMessage(
                         channel=msg.channel,
                         chat_id=msg.chat_id,
