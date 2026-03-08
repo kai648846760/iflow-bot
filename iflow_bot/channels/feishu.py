@@ -674,6 +674,7 @@ class FeishuChannel(BaseChannel):
 
         loop = asyncio.get_running_loop()
         payload = json.dumps({"text": content}, ensure_ascii=False)
+        content_len = len(content)
         created_id = await loop.run_in_executor(
             None, self._send_message_sync,
             receive_id_type, receive_id, "text", payload
@@ -681,9 +682,19 @@ class FeishuChannel(BaseChannel):
         if created_id:
             if stream_key:
                 self._streaming_last_content[stream_key] = content
-            logger.warning(f"Feishu streaming degraded to text fallback: {stream_key or receive_id}")
+            logger.warning(
+                "Feishu streaming degraded to text fallback: stream_key=%s receive_id=%s content_len=%d",
+                stream_key or receive_id,
+                receive_id,
+                content_len,
+            )
             return True
-        logger.error(f"Feishu text fallback send failed: {stream_key or receive_id}")
+        logger.error(
+            "Feishu text fallback send failed: stream_key=%s receive_id=%s content_len=%d",
+            stream_key or receive_id,
+            receive_id,
+            content_len,
+        )
         return False
 
     async def _handle_streaming_message(
@@ -704,9 +715,12 @@ class FeishuChannel(BaseChannel):
 
         content = (msg.content or "").strip()
         if not content:
+            logger.debug(f"Feishu streaming skip empty content: {stream_key}")
             return
 
+        content_len = len(content)
         if self._streaming_last_content.get(stream_key) == content:
+            logger.debug(f"Feishu streaming skip duplicate content: {stream_key} len={content_len}")
             return
 
         source_message_id = msg.metadata.get("reply_to_id")
@@ -721,16 +735,38 @@ class FeishuChannel(BaseChannel):
 
         message_id = self._streaming_message_ids.get(stream_key)
         if message_id:
+            logger.debug(
+                "Feishu streaming patch attempt: stream_key=%s message_id=%s content_len=%d",
+                stream_key,
+                message_id,
+                content_len,
+            )
             patched = await loop.run_in_executor(
                 None, self._patch_message_sync, message_id, card_content
             )
             if patched:
                 self._streaming_last_content[stream_key] = content
-                logger.debug(f"Feishu streaming patched: {stream_key}")
+                logger.debug(
+                    "Feishu streaming patched: stream_key=%s message_id=%s content_len=%d",
+                    stream_key,
+                    message_id,
+                    content_len,
+                )
                 return
             self._streaming_message_ids.pop(stream_key, None)
-            logger.warning(f"Feishu streaming patch failed, recreating: {stream_key}")
+            logger.warning(
+                "Feishu streaming patch failed, recreating: stream_key=%s message_id=%s content_len=%d",
+                stream_key,
+                message_id,
+                content_len,
+            )
 
+        logger.debug(
+            "Feishu streaming create attempt: stream_key=%s receive_id=%s content_len=%d",
+            stream_key,
+            msg.chat_id,
+            content_len,
+        )
         created_id = await loop.run_in_executor(
             None, self._send_message_sync,
             receive_id_type, msg.chat_id, "interactive", card_content
@@ -738,10 +774,20 @@ class FeishuChannel(BaseChannel):
         if created_id:
             self._streaming_message_ids[stream_key] = created_id
             self._streaming_last_content[stream_key] = content
-            logger.info(f"Feishu streaming placeholder sent: {stream_key}")
+            logger.info(
+                "Feishu streaming placeholder sent: stream_key=%s message_id=%s content_len=%d",
+                stream_key,
+                created_id,
+                content_len,
+            )
             return
 
-        logger.error(f"Feishu streaming placeholder send failed: {stream_key}")
+        logger.error(
+            "Feishu streaming placeholder send failed: stream_key=%s receive_id=%s content_len=%d",
+            stream_key,
+            msg.chat_id,
+            content_len,
+        )
         await self._send_text_fallback(receive_id_type, msg.chat_id, content, stream_key=stream_key)
 
     def _add_reaction_sync(self, message_id: str, emoji_type: str) -> Optional[str]:
