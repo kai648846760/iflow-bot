@@ -117,7 +117,7 @@ class IFlowAdapter:
         mode: Literal["cli", "acp", "stdio"] = "cli",
         acp_host: str = "localhost",
         acp_port: int = 8090,
-        compression_trigger_tokens: int = 88888,
+        compression_trigger_tokens: int = 60000,
         mcp_proxy_port: int = 8888,
         mcp_servers_auto_discover: bool = True,
         mcp_servers_max: int = 10,

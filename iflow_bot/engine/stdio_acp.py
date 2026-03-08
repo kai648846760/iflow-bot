@@ -791,7 +791,7 @@ class StdioACPAdapter:
         timeout: int = DEFAULT_TIMEOUT,
         default_model: str = "glm-5",
         thinking: bool = False,
-        active_compress_trigger_tokens: int = 88888,
+        active_compress_trigger_tokens: int = 60000,
         mcp_proxy_port: int = 8888,
         mcp_servers_auto_discover: bool = True,
         mcp_servers_max: int = 10,

@@ -180,7 +180,7 @@ class DriverConfig(BaseModel):
     thinking: bool = False
     max_turns: int = 40
     timeout: int = Field(default_factory=_get_default_timeout)
-    compression_trigger_tokens: int = 88888
+    compression_trigger_tokens: int = 60000
     """活跃会话自动压缩触发阈值（估算 token）"""
     workspace: str = ""  # 关键：iflow 工作目录
     extra_args: list[str] = Field(default_factory=list)

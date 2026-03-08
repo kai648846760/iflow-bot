@@ -11,6 +11,7 @@ All notable changes to this project will be documented in this file.
 - chore(feishu): Add compact streaming observability logs for patch/create/fallback decisions and content length to speed up production debugging.
 - fix(session): Ensure `/new` clears stdio runtime session state completely, including mapped session ids, loaded-session cache, and queued rehydrate history, so users actually get a fresh conversation.
 - test(session): Add regression tests for stdio session clearing to prevent `/new` from leaving stale runtime context behind.
+- tweak(compression): Lower the default proactive session compression trigger from `88888` to `60000` tokens so long-running chats rotate earlier instead of relying almost entirely on overflow/empty-response recovery.
 
 ## v0.3.4 - 2026-03-06
 
