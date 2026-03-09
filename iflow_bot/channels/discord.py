@@ -52,8 +52,8 @@ class DiscordChannel(BaseChannel):
         super().__init__(config, bus)
         self.client: Optional[discord.Client] = None
         self._ready_event = asyncio.Event()
-        self._streaming_messages: dict[str, discord.Message] = {}
-        self._streaming_last_content: dict[str, str] = {}
+        self._streaming_messages: dict[str, discord.Message] = {}  # 预览消息
+        self._streaming_last_content: dict[str, str] = {}  # 完整内容
         self._typing_tasks: dict[str, asyncio.Task] = {}
         self._typing_targets: dict[str, discord.abc.Messageable] = {}
 
@@ -217,34 +217,68 @@ class DiscordChannel(BaseChannel):
         target: discord.abc.Messageable,
         msg: OutboundMessage,
     ) -> None:
+        """处理流式消息。
+
+        策略：
+        - 流式中：编辑同一条消息（实时预览，最多显示2000字符）
+        - 流式结束：如果完整内容超长，分片发送
+        """
         chat_id = str(msg.chat_id)
 
+        # 流式结束
         if msg.metadata.get("_streaming_end"):
-            self._streaming_messages.pop(chat_id, None)
-            self._streaming_last_content.pop(chat_id, None)
+            full_content = self._streaming_last_content.pop(chat_id, "")
+            preview_msg = self._streaming_messages.pop(chat_id, None)
             self._stop_typing(chat_id)
+
+            if not full_content.strip():
+                return
+
+            # 如果内容超长，删除预览消息，分片发送完整内容
+            if len(full_content) > DISCORD_MAX_MESSAGE_LENGTH:
+                if preview_msg:
+                    try:
+                        await preview_msg.delete()
+                    except Exception:
+                        pass
+                await self._send_chunked(target, full_content)
+                logger.info(f"[{self.name}] Sent long message: {len(full_content)} chars in chunks")
+            else:
+                # 内容不超长，编辑预览消息为最终内容
+                if preview_msg:
+                    try:
+                        await preview_msg.edit(content=full_content)
+                    except Exception:
+                        await target.send(content=full_content)
+                else:
+                    await target.send(content=full_content)
             return
 
         content = (msg.content or "").strip()
         if not content:
             return
+
         self._start_typing(chat_id, target)
 
+        # 检查是否有新内容
         if self._streaming_last_content.get(chat_id) == content:
             return
 
-        stream_message = self._streaming_messages.get(chat_id)
-        if stream_message is not None:
+        # 记录完整内容
+        self._streaming_last_content[chat_id] = content
+
+        # 编辑或发送预览消息（截断显示）
+        preview_msg = self._streaming_messages.get(chat_id)
+        preview_content = content[:DISCORD_MAX_MESSAGE_LENGTH]
+
+        if preview_msg:
             try:
-                await stream_message.edit(content=content[:DISCORD_MAX_MESSAGE_LENGTH])
-                self._streaming_last_content[chat_id] = content
-                return
+                await preview_msg.edit(content=preview_content)
             except Exception:
                 self._streaming_messages.pop(chat_id, None)
-
-        sent = await target.send(content=content[:DISCORD_MAX_MESSAGE_LENGTH])
-        self._streaming_messages[chat_id] = sent
-        self._streaming_last_content[chat_id] = content
+        else:
+            sent = await target.send(content=preview_content)
+            self._streaming_messages[chat_id] = sent
 
     async def _get_send_target(
         self, chat_id: str, metadata: dict[str, Any]
