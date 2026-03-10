@@ -171,7 +171,7 @@ Configuration file located at `~/.iflow-bot/config.json`
     "yolo": true,
     "thinking": false,
     "max_turns": 40,
-    "timeout": 180,
+    "timeout": 300,
     "workspace": "~/.iflow-bot/workspace",
     "extra_args": []
   },
@@ -263,7 +263,7 @@ Configuration file located at `~/.iflow-bot/config.json`
 | `yolo` | bool | `true` | Auto-confirm mode |
 | `thinking` | bool | `false` | Show AI thinking process |
 | `max_turns` | int | `40` | Maximum conversation turns per session |
-| `timeout` | int | `180` | Timeout in seconds |
+| `timeout` | int | `300` | Timeout in seconds |
 | `workspace` | string | `~/.iflow-bot/workspace` | Workspace path |
 | `extra_args` | list | `[]` | Additional iflow arguments |
 | `acp_port` | int | `8090` | Port for ACP mode |

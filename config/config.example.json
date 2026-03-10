@@ -6,7 +6,7 @@
     "yolo": true,
     "thinking": false,
     "max_turns": 40,
-    "timeout": 180,
+    "timeout": 300,
     "workspace": "/root/.iflow-bot/workspace",
     "extra_args": []
   },

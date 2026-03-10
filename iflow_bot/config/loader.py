@@ -10,8 +10,7 @@ from loguru import logger
 from iflow_bot.config.schema import Config
 
 # 统一的超时常量定义
-DEFAULT_TIMEOUT = 180  # 默认超时时间（秒）
-LEGACY_DEFAULT_TIMEOUT = 300  # 旧版默认值，用于迁移检测
+DEFAULT_TIMEOUT = 300  # 默认超时时间（秒）
 
 
 def get_config_dir() -> Path:
@@ -80,12 +79,9 @@ def load_config(config_path: Optional[Path] = None, auto_create: bool = True) ->
 
 
 def _migrate_legacy_driver_timeout(data: dict) -> tuple[dict, bool]:
-    """Migrate legacy default timeout to new default for upgraded users.
+    """确保配置中有 timeout 字段。
 
-    Rules:
-    - If `driver.timeout` is missing, set it to DEFAULT_TIMEOUT.
-    - If `driver.timeout` equals legacy default 300 (int or string), set to DEFAULT_TIMEOUT.
-    - Keep all other custom timeout values unchanged.
+    只在 timeout 缺失时设置默认值，不修改用户已有的配置。
     """
     migrated = False
     driver = data.get("driver")
@@ -94,9 +90,6 @@ def _migrate_legacy_driver_timeout(data: dict) -> tuple[dict, bool]:
 
     timeout = driver.get("timeout")
     if timeout is None:
-        driver["timeout"] = DEFAULT_TIMEOUT
-        migrated = True
-    elif timeout == LEGACY_DEFAULT_TIMEOUT or timeout == str(LEGACY_DEFAULT_TIMEOUT):
         driver["timeout"] = DEFAULT_TIMEOUT
         migrated = True
 
