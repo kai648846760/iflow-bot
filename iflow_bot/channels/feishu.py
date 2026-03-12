@@ -37,6 +37,8 @@ try:
         PatchMessageRequest,
         PatchMessageRequestBody,
         P2ImMessageReceiveV1,
+        P2ImMessageReactionCreatedV1,
+        P2ImMessageReactionDeletedV1,
     )
     FEISHU_AVAILABLE = True
 except ImportError:
@@ -359,12 +361,16 @@ class FeishuChannel(BaseChannel):
             .log_level(lark.LogLevel.ERROR) \
             .build()
 
-        # Create event handler (only register message receive)
+        # Create event handler (register message receive and reaction events)
         event_handler = lark.EventDispatcherHandler.builder(
             self.config.encrypt_key or "",
             self.config.verification_token or "",
         ).register_p2_im_message_receive_v1(
             self._on_message_sync
+        ).register_p2_im_message_reaction_created_v1(
+            self._on_reaction_created_sync
+        ).register_p2_im_message_reaction_deleted_v1(
+            self._on_reaction_deleted_sync
         ).build()
 
         # Create WebSocket client for long connection
@@ -988,6 +994,14 @@ class FeishuChannel(BaseChannel):
 
         except Exception as e:
             logger.error(f"Error sending Feishu message: {e}")
+
+    def _on_reaction_created_sync(self, data: "P2ImMessageReactionCreatedV1") -> None:
+        """Handle message reaction created event (no-op, just to suppress errors)."""
+        pass
+
+    def _on_reaction_deleted_sync(self, data: "P2ImMessageReactionDeletedV1") -> None:
+        """Handle message reaction deleted event (no-op, just to suppress errors)."""
+        pass
 
     def _on_message_sync(self, data: "P2ImMessageReceiveV1") -> None:
         """Sync handler for incoming messages (called from WebSocket thread).
