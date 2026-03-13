@@ -134,7 +134,7 @@ class CronService:
     ):
         """
         Initialize the cron service.
-        
+
         Args:
             store_path: Path to the JSON file for persisting jobs
             on_job: Callback for job execution
@@ -143,6 +143,7 @@ class CronService:
         self.on_job = on_job
         self._store: Optional[CronStore] = None
         self._timer_task: Optional[asyncio.Task] = None
+        self._file_watcher_task: Optional[asyncio.Task] = None
         self._running = False
     
     def _load_store(self) -> CronStore:
@@ -179,12 +180,14 @@ class CronService:
     async def start(self) -> None:
         """Start the cron service."""
         self._running = True
+        # Force reload store to clear cache (important for restart scenarios)
+        self._store = None
         self._load_store()
         self._recompute_next_runs()
         self._save_store()
         self._arm_timer()
         self._start_file_watcher()
-        
+
         job_count = len(self._store.jobs) if self._store else 0
         logger.info(f"Cron service started with {job_count} jobs")
     
@@ -194,6 +197,9 @@ class CronService:
         if self._timer_task:
             self._timer_task.cancel()
             self._timer_task = None
+        if self._file_watcher_task:
+            self._file_watcher_task.cancel()
+            self._file_watcher_task = None
         logger.info("Cron service stopped")
     
     def _start_file_watcher(self) -> None:
@@ -218,10 +224,10 @@ class CronService:
                             self._arm_timer()
                 except Exception as e:
                     logger.error(f"Cron file watcher error: {e}")
-                
+
                 await asyncio.sleep(5)  # Check every 5 seconds
-        
-        asyncio.create_task(watch_file())
+
+        self._file_watcher_task = asyncio.create_task(watch_file())
     
     def _recompute_next_runs(self) -> None:
         """Recompute next run times for all enabled jobs."""
