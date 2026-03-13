@@ -86,6 +86,62 @@ def get_iflow_config_dir() -> Path:
         return Path.home() / ".iflow"
 
 
+def ensure_iflow_skills_dir(workspace: Path) -> None:
+    """Ensure iflow CLI loads skills from workspace/skills.
+
+    Prefer a symlink from ~/.iflow/skills to workspace/skills. If symlink
+    is unavailable, fall back to a one-way sync copy.
+    """
+    import os
+    import shutil
+    import time
+
+    try:
+        workspace = Path(str(workspace).replace("~", str(Path.home())))
+        skills_dir = workspace / "skills"
+        skills_dir.mkdir(parents=True, exist_ok=True)
+
+        iflow_dir = get_iflow_config_dir()
+        iflow_dir.mkdir(parents=True, exist_ok=True)
+        target = iflow_dir / "skills"
+
+        if target.exists() or target.is_symlink():
+            try:
+                if target.resolve() == skills_dir.resolve():
+                    return
+            except Exception:
+                pass
+
+            if target.is_symlink():
+                try:
+                    target.unlink()
+                except Exception as e:
+                    logger.warning(f"Failed to remove existing skills symlink: {e}")
+            else:
+                backup = iflow_dir / f"skills.bak.{int(time.time())}"
+                try:
+                    target.rename(backup)
+                    logger.info(f"Backed up existing iflow skills dir to {backup}")
+                except Exception as e:
+                    logger.warning(f"Failed to backup existing iflow skills dir: {e}")
+
+        try:
+            os.symlink(skills_dir, target, target_is_directory=True)
+            logger.info(f"Linked iflow skills dir to workspace: {skills_dir}")
+            return
+        except Exception as e:
+            logger.warning(f"Failed to symlink iflow skills dir: {e}")
+
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(skills_dir, target, dirs_exist_ok=True)
+            logger.info(f"Synced workspace skills to {target}")
+        except Exception as e:
+            logger.warning(f"Failed to sync skills dir: {e}")
+    except Exception as e:
+        logger.warning(f"Failed to ensure iflow skills dir: {e}")
+
+
 def sync_mcp_from_iflow(overwrite: bool = False) -> bool:
     """Sync MCP servers from iflow CLI settings to iflow-bot.
 

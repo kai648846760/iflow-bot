@@ -381,6 +381,13 @@ def init_workspace(workspace: Path) -> None:
             json.dump(default_settings, f, indent=2, ensure_ascii=False)
         console.print(f"[green]{_OK_MARK}[/green] Created {settings_path}")
 
+    # 绑定 iflow skills 目录到 workspace/skills
+    try:
+        from iflow_bot.utils.helpers import ensure_iflow_skills_dir
+        ensure_iflow_skills_dir(workspace)
+    except Exception as e:
+        console.print(f"[yellow]Failed to link iflow skills directory: {e}[/yellow]")
+
     # 检查 workspace 是否已经初始化（通过检查核心文件是否存在）
     core_files = ["AGENTS.md", "BOOT.md", "SOUL.md"]
     is_initialized = any((workspace / f).exists() for f in core_files)
