@@ -977,7 +977,8 @@ async def _run_gateway(config, verbose: bool = False) -> None:
     
     # 创建 Cron 服务
     cron_store_path = get_data_dir() / "cron" / "jobs.json"
-    cron = CronService(cron_store_path)
+    driver_timeout = getattr(config.driver, "timeout", 600) if config and config.driver else 600
+    cron = CronService(cron_store_path, job_timeout_s=driver_timeout)
     
     # 设置 cron 任务回调
     async def on_cron_job(job: CronJob) -> str | None:

@@ -130,7 +130,8 @@ class CronService:
     def __init__(
         self,
         store_path: Path,
-        on_job: Optional[Callable[[CronJob], Coroutine[Any, Any, str | None]]] = None
+        on_job: Optional[Callable[[CronJob], Coroutine[Any, Any, str | None]]] = None,
+        job_timeout_s: Optional[int] = 600,
     ):
         """
         Initialize the cron service.
@@ -141,6 +142,7 @@ class CronService:
         """
         self.store_path = store_path
         self.on_job = on_job
+        self.job_timeout_s = job_timeout_s if job_timeout_s and job_timeout_s > 0 else None
         self._store: Optional[CronStore] = None
         self._timer_task: Optional[asyncio.Task] = None
         self._running = False
@@ -223,15 +225,31 @@ class CronService:
         
         asyncio.create_task(watch_file())
     
-    def _recompute_next_runs(self) -> None:
+    def _recompute_next_runs(self, now_ms: Optional[int] = None) -> bool:
         """Recompute next run times for all enabled jobs."""
         if not self._store:
-            return
-        now = _now_ms()
+            return False
+        now = now_ms or _now_ms()
+        changed = False
         
         for job in self._store.jobs:
             if job.enabled:
-                job.state.next_run_at_ms = _compute_next_run(job.schedule, now)
+                next_run = _compute_next_run(job.schedule, now)
+                if next_run != job.state.next_run_at_ms:
+                    job.state.next_run_at_ms = next_run
+                    job.updated_at_ms = now
+                    changed = True
+
+                if job.schedule.kind == "at" and job.schedule.at_ms:
+                    max_delay_ms = 5 * 60 * 1000
+                    if job.schedule.at_ms < now - max_delay_ms and job.state.last_run_at_ms is None:
+                        job.state.last_status = "missed"
+                        job.state.last_error = "execution window expired"
+                        job.state.last_run_at_ms = now
+                        job.updated_at_ms = now
+                        changed = True
+
+        return changed
     
     def _get_next_wake_ms(self) -> Optional[int]:
         """Get the earliest next run time across all jobs."""
@@ -290,12 +308,19 @@ class CronService:
         try:
             response = None
             if self.on_job:
-                response = await self.on_job(job)
+                if self.job_timeout_s:
+                    response = await asyncio.wait_for(self.on_job(job), timeout=self.job_timeout_s)
+                else:
+                    response = await self.on_job(job)
             
             job.state.last_status = "ok"
             job.state.last_error = None
             logger.info(f"Cron: job '{job.name}' completed")
             
+        except asyncio.TimeoutError:
+            job.state.last_status = "timeout"
+            job.state.last_error = f"timeout after {self.job_timeout_s}s" if self.job_timeout_s else "timeout"
+            logger.error(f"Cron: job '{job.name}' timed out")
         except Exception as e:
             job.state.last_status = "error"
             job.state.last_error = str(e)
@@ -319,6 +344,9 @@ class CronService:
     def list_jobs(self, include_disabled: bool = False) -> list[CronJob]:
         """List all jobs."""
         store = self._load_store()
+        changed = self._recompute_next_runs()
+        if changed:
+            self._save_store()
         jobs = store.jobs if include_disabled else [j for j in store.jobs if j.enabled]
         return sorted(jobs, key=lambda j: j.state.next_run_at_ms or float('inf'))
     

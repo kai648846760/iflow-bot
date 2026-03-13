@@ -87,7 +87,7 @@ class CronJobState:
     last_run_at_ms: Optional[int] = None
     """Last execution timestamp in milliseconds"""
     
-    last_status: Optional[Literal["ok", "error", "skipped"]] = None
+    last_status: Optional[Literal["ok", "error", "skipped", "timeout", "missed"]] = None
     """Last execution status"""
     
     last_error: Optional[str] = None
