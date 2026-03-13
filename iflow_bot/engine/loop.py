@@ -145,6 +145,35 @@ class AgentLoop:
                     return item
             return None
 
+        async def _ensure_skillhub_cli() -> tuple[Optional[str], Optional[str], bool]:
+            path = _find_skillhub_binary()
+            if path:
+                return path, None, False
+
+            install_cmd = (
+                "curl -fsSL https://skillhub-1388575217.cos.ap-guangzhou.myqcloud.com/install/install.sh "
+                "| bash -s -- --cli-only"
+            )
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "bash",
+                    "-lc",
+                    install_cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=180)
+                if proc.returncode != 0:
+                    err = (stderr or stdout or b"").decode("utf-8", errors="replace").strip()
+                    return None, err or "SkillHub CLI 安装失败", False
+            except Exception as e:
+                return None, str(e), False
+
+            path = _find_skillhub_binary()
+            if not path:
+                return None, "SkillHub CLI 安装完成但未找到可执行文件", False
+            return path, None, True
+
         def _format_skillhub_search_output(text: str) -> str:
             if not text:
                 return text
@@ -386,11 +415,13 @@ class AgentLoop:
                     )
                     return True
 
-                skillhub = _find_skillhub_binary()
+                skillhub, install_err, auto_installed = await _ensure_skillhub_cli()
                 if not skillhub:
                     await self._send_command_reply(
                         msg,
-                        "未检测到 SkillHub CLI。请先安装：\n"
+                        "❌ 自动安装 SkillHub CLI 失败："
+                        f"{install_err or 'unknown error'}\n"
+                        "请手动执行：\n"
                         "curl -fsSL https://skillhub-1388575217.cos.ap-guangzhou.myqcloud.com/install/install.sh | bash -s -- --cli-only",
                     )
                     return True
@@ -473,6 +504,9 @@ class AgentLoop:
                 elif subcmd == "install":
                     slug = passthrough[0] if passthrough else ""
                     text = _format_skillhub_install_output(text, slug)
+
+                if auto_installed:
+                    text = f"✅ SkillHub CLI 已自动安装\n{text}"
 
                 if len(text) > 4000:
                     text = text[:4000] + "\n... (truncated)"

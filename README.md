@@ -634,7 +634,8 @@ These commands are sent inside your chat app (Telegram/Feishu/DingTalk/etc.):
 
 ### SkillHub CLI (for /skills)
 
-`/skills` uses SkillHub CLI. Install once on the host:
+`/skills` uses SkillHub CLI. If it is missing, the bot will auto-install it.
+You can also install it manually:
 
 ```bash
 curl -fsSL https://skillhub-1388575217.cos.ap-guangzhou.myqcloud.com/install/install.sh | bash -s -- --cli-only

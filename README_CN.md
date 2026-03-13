@@ -634,7 +634,8 @@ iflow-bot commands --help
 
 ## 🧰 SkillHub CLI（/skills 依赖）
 
-`/skills` 使用 SkillHub CLI，需在宿主机安装一次：
+`/skills` 使用 SkillHub CLI，如果缺失会自动安装。
+也可手动安装：
 
 ```bash
 curl -fsSL https://skillhub-1388575217.cos.ap-guangzhou.myqcloud.com/install/install.sh | bash -s -- --cli-only
