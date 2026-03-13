@@ -10,6 +10,10 @@ All notable changes to this project will be documented in this file.
 - fix(qq): Download incoming image attachments and inject image paths so QQ channel can perform image analysis via `image_read`.
 - fix(stdio): Prewarm ACP initialization/authentication at gateway start to reduce first-message latency.
 
+## v0.4.2 - 2026-03-13
+
+- fix(media): Save inbound images to workspace/images for Feishu/Telegram/Discord and normalize media paths before invoking iflow.
+
 ## v0.4.1 - 2026-03-13
 
 - fix(cron): Auto-fill `deliver/channel/to` for chat `/cron add` when omitted so scheduled messages reply in the same chat by default.

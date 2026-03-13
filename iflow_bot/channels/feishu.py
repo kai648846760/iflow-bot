@@ -633,7 +633,8 @@ class FeishuChannel(BaseChannel):
             (file_path, content_text) - file_path is None if download failed
         """
         loop = asyncio.get_running_loop()
-        media_dir = Path.home() / ".iflow-bot" / "media"
+        from iflow_bot.utils.helpers import get_workspace_dir
+        media_dir = get_workspace_dir() / "images"
         media_dir.mkdir(parents=True, exist_ok=True)
 
         data: Optional[bytes] = None

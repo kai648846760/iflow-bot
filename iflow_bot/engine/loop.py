@@ -642,6 +642,73 @@ time: {now}
             return f"{message}\n\n{prompt}"
         return prompt
 
+    async def _resolve_media_paths(self, media: list[str]) -> list[str]:
+        """Normalize media to local files (download remote URLs into workspace)."""
+        resolved: list[str] = []
+        if not media:
+            return resolved
+
+        workspace = self.workspace or Path.home() / ".iflow-bot" / "workspace"
+        media_dir = workspace / "images"
+        media_dir.mkdir(parents=True, exist_ok=True)
+
+        def _is_url(value: str) -> bool:
+            return value.startswith("http://") or value.startswith("https://")
+
+        async def _download(url: str) -> Optional[str]:
+            import hashlib
+            import mimetypes
+            import aiohttp
+
+            suffix = ""
+            try:
+                suffix = Path(url.split("?")[0]).suffix
+            except Exception:
+                suffix = ""
+
+            name_hash = hashlib.sha1(url.encode("utf-8")).hexdigest()[:16]
+            file_path = media_dir / f"remote_{name_hash}{suffix or ''}"
+            try:
+                timeout = aiohttp.ClientTimeout(total=30)
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.get(url) as resp:
+                        if resp.status != 200:
+                            logger.warning("Failed to download media: {} -> HTTP {}", url, resp.status)
+                            return None
+                        content_type = resp.headers.get("Content-Type", "")
+                        if not suffix:
+                            ext = mimetypes.guess_extension(content_type.split(";")[0].strip()) or ""
+                            if ext:
+                                file_path = media_dir / f"remote_{name_hash}{ext}"
+                        data = await resp.read()
+                        file_path.write_bytes(data)
+                        return str(file_path)
+            except Exception as e:
+                logger.warning("Failed to download media {}: {}", url, e)
+                return None
+
+        for item in media:
+            if not item:
+                continue
+            if _is_url(item):
+                downloaded = await _download(item)
+                if downloaded:
+                    resolved.append(downloaded)
+                else:
+                    resolved.append(item)
+                continue
+            path = Path(item)
+            if not path.is_absolute():
+                candidate = media_dir / path
+                if candidate.exists():
+                    resolved.append(str(candidate))
+                else:
+                    resolved.append(str(path))
+            else:
+                resolved.append(str(path))
+
+        return resolved
+
     def _analyze_and_build_outbound(
         self,
         response: str,
@@ -787,7 +854,8 @@ time: {now}
 
                 # 注入媒体文件路径（用于图片/文件识别）
                 if msg.media:
-                    message_content = self._append_media_prompt(message_content, msg.media)
+                    media_paths = await self._resolve_media_paths(msg.media)
+                    message_content = self._append_media_prompt(message_content, media_paths)
                 
                 # 检查引导文件（优先 BOOTSTRAP.md，否则 AGENTS.md）
                 bootstrap_content, is_bootstrap = self._get_bootstrap_content()

@@ -5,6 +5,7 @@
 
 import asyncio
 import logging
+from pathlib import Path
 from typing import Any, Optional
 
 import discord
@@ -513,10 +514,25 @@ class DiscordChannel(BaseChannel):
         # 提取消息内容
         content = message.content or ""
 
-        # 提取媒体附件
-        media = []
+        # 提取媒体附件（优先下载图片到本地，便于识别）
+        media: list[str] = []
         if message.attachments:
+            from iflow_bot.utils.helpers import get_workspace_dir
+            media_dir = get_workspace_dir() / "images"
+            media_dir.mkdir(parents=True, exist_ok=True)
             for attachment in message.attachments:
+                content_type = attachment.content_type or ""
+                is_image = content_type.startswith("image/")
+                if is_image:
+                    try:
+                        ext = Path(attachment.filename or "").suffix or ".png"
+                        file_path = media_dir / f"{attachment.id}{ext}"
+                        await attachment.save(file_path)
+                        media.append(str(file_path))
+                        continue
+                    except Exception as e:
+                        logger.warning("[discord] Failed to download image {}: {}", attachment.url, e)
+                # fallback: keep remote url
                 media.append(attachment.url)
 
         # 提取消息中的图片链接

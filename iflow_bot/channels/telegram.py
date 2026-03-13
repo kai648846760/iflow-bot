@@ -449,7 +449,8 @@ class TelegramChannel(BaseChannel):
         if media_file and self._app:
             try:
                 file = await self._app.bot.get_file(media_file.file_id)
-                media_dir = Path.home() / ".iflow-bot" / "media"
+                from iflow_bot.utils.helpers import get_workspace_dir
+                media_dir = get_workspace_dir() / "images"
                 media_dir.mkdir(parents=True, exist_ok=True)
                 
                 ext = Path(file.file_path).suffix if file.file_path else ""
