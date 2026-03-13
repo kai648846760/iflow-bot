@@ -142,6 +142,32 @@ def ensure_iflow_skills_dir(workspace: Path) -> None:
         logger.warning(f"Failed to ensure iflow skills dir: {e}")
 
 
+def sync_iflow_skills_dir(workspace: Path) -> None:
+    """Sync workspace/skills to iflow config dir (for non-symlink setups)."""
+    import shutil
+
+    try:
+        workspace = Path(str(workspace).replace("~", str(Path.home())))
+        skills_dir = workspace / "skills"
+        skills_dir.mkdir(parents=True, exist_ok=True)
+
+        iflow_dir = get_iflow_config_dir()
+        iflow_dir.mkdir(parents=True, exist_ok=True)
+        target = iflow_dir / "skills"
+
+        if target.is_symlink():
+            return
+
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(skills_dir, target, dirs_exist_ok=True)
+            logger.info(f"Synced workspace skills to {target}")
+        except Exception as e:
+            logger.warning(f"Failed to sync skills dir: {e}")
+    except Exception as e:
+        logger.warning(f"Failed to sync iflow skills dir: {e}")
+
+
 def sync_mcp_from_iflow(overwrite: bool = False) -> bool:
     """Sync MCP servers from iflow CLI settings to iflow-bot.
 

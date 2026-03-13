@@ -611,6 +611,35 @@ iflow-bot skill --help
 iflow-bot commands --help
 ```
 
+### Chat Slash Commands
+
+These commands are sent inside your chat app (Telegram/Feishu/DingTalk/etc.):
+
+```
+/status                 Show status (model, session, compression count)
+/new                    Start a new conversation
+/compact                Manually compact current conversation
+/help                   Show help
+/cron list              List scheduled tasks
+/cron add ...           Add a task (see /help for args)
+/cron delete <id>       Delete a task
+/model set <name>       Switch model for new sessions
+/language <en-US|zh-CN> Set language
+/skills find <keyword>  Search skills (SkillHub)
+/skills add <slug>      Install skill to workspace/skills
+/skills list            List installed skills
+/skills remove <slug>   Uninstall skill
+/skills update          Upgrade installed skills
+```
+
+### SkillHub CLI (for /skills)
+
+`/skills` uses SkillHub CLI. Install once on the host:
+
+```bash
+curl -fsSL https://skillhub-1388575217.cos.ap-guangzhou.myqcloud.com/install/install.sh | bash -s -- --cli-only
+```
+
 ## 📁 Directory Structure
 
 ```

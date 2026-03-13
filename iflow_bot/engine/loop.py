@@ -108,7 +108,7 @@ class AgentLoop:
             "/compact 手动压缩会话\n"
             "/model set <name>  修改模型\n"
             "/cron list | /cron add | /cron delete <id>\n"
-            "/skills <args>  透传 npx skills\n"
+            "/skills find|add|list|remove|update  管理 Skills（SkillHub）\n"
             "/language <en-US|zh-CN>  设置语言\n"
             "/help    查看帮助\n"
         )
@@ -120,6 +120,91 @@ class AgentLoop:
         from iflow_bot.cron.service import CronService
         from iflow_bot.cron.types import CronSchedule
         from iflow_bot.utils.platform import prepare_subprocess_command
+        import re
+
+        def _strip_ansi(text: str) -> str:
+            if not text:
+                return ""
+            # Remove ANSI escape sequences and other terminal control codes
+            text = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", text)
+            text = re.sub(r"\x1b\][^\x07]*\x07", "", text)  # OSC
+            text = re.sub(r"\x1b\\", "", text)
+            # Remove other non-printable control chars except \n and \t
+            text = "".join(ch for ch in text if ch == "\n" or ch == "\t" or ord(ch) >= 32)
+            return text.strip()
+
+        def _find_skillhub_binary() -> Optional[str]:
+            import shutil
+
+            candidates = [
+                shutil.which("skillhub"),
+                str(Path.home() / ".local" / "bin" / "skillhub"),
+            ]
+            for item in candidates:
+                if item and Path(item).exists():
+                    return item
+            return None
+
+        def _format_skillhub_search_output(text: str) -> str:
+            if not text:
+                return text
+            lines = [line.rstrip() for line in text.splitlines() if line.strip()]
+            entries: list[dict[str, str]] = []
+            current: dict[str, str] | None = None
+            for line in lines:
+                if line.startswith("You can use"):
+                    continue
+                if not line.startswith(" "):
+                    if current:
+                        entries.append(current)
+                    parts = line.split(None, 1)
+                    slug = parts[0].strip()
+                    title = parts[1].strip() if len(parts) > 1 else ""
+                    current = {"slug": slug, "title": title, "desc": "", "version": ""}
+                else:
+                    if not current:
+                        continue
+                    item = line.strip()
+                    if item.startswith("- "):
+                        content = item[2:].strip()
+                        if content.startswith("version:"):
+                            current["version"] = content.replace("version:", "").strip()
+                        elif not current["desc"]:
+                            current["desc"] = content
+            if current:
+                entries.append(current)
+            if not entries:
+                return text
+            formatted = ["技能搜索结果（用 /skills add <slug> 安装）："]
+            for idx, entry in enumerate(entries, start=1):
+                title = f"（{entry['title']}）" if entry["title"] else ""
+                ver = f" v{entry['version']}" if entry["version"] else ""
+                formatted.append(f"[{idx}] {entry['slug']}{title}{ver}")
+                if entry["desc"]:
+                    formatted.append(f"    {entry['desc']}")
+                formatted.append(f"    /skills add {entry['slug']}")
+            return "\n".join(formatted)
+
+        def _format_skillhub_list_output(text: str) -> str:
+            if not text:
+                return "暂无已安装技能"
+            if "No installed skills." in text:
+                return "暂无已安装技能"
+            lines = [line.strip() for line in text.splitlines() if line.strip()]
+            formatted = ["已安装技能："]
+            for line in lines:
+                formatted.append(f"- {line}")
+            return "\n".join(formatted)
+
+        def _format_skillhub_install_output(text: str, slug: str) -> str:
+            m = re.search(r"Installed:\\s*([^\\s]+)\\s*->\\s*(.+)$", text, re.M)
+            if m:
+                installed = m.group(1).strip()
+                path = m.group(2).strip()
+                return f"✅ 已安装 {installed}\n路径: {path}"
+            if text:
+                return text
+            return f"✅ 已安装 {slug}"
 
         raw = (msg.content or "").strip()
         if not raw.startswith("/"):
@@ -134,6 +219,8 @@ class AgentLoop:
             return False
 
         cmd = parts[0].lower()
+        if "@" in cmd:
+            cmd = cmd.split("@", 1)[0]
         args = parts[1:]
 
         if cmd in {"/help"}:
@@ -292,7 +379,80 @@ class AgentLoop:
 
         if cmd == "/skills":
             try:
-                cmdline = ["npx", "skills"] + args
+                if not args:
+                    await self._send_command_reply(
+                        msg,
+                        "用法：/skills find <关键词> | /skills add <slug> | /skills list | /skills remove <slug> | /skills update",
+                    )
+                    return True
+
+                skillhub = _find_skillhub_binary()
+                if not skillhub:
+                    await self._send_command_reply(
+                        msg,
+                        "未检测到 SkillHub CLI。请先安装：\n"
+                        "curl -fsSL https://skillhub-1388575217.cos.ap-guangzhou.myqcloud.com/install/install.sh | bash -s -- --cli-only",
+                    )
+                    return True
+
+                sub = args[0].lower()
+                if sub in {"find", "search"}:
+                    subcmd = "search"
+                    passthrough = args[1:]
+                elif sub in {"add", "install"}:
+                    subcmd = "install"
+                    passthrough = args[1:]
+                elif sub in {"list", "ls"}:
+                    subcmd = "list"
+                    passthrough = []
+                elif sub in {"update", "upgrade"}:
+                    subcmd = "upgrade"
+                    passthrough = []
+                elif sub in {"remove", "rm", "uninstall"}:
+                    if len(args) < 2:
+                        await self._send_command_reply(msg, "⚠️ 缺少技能 slug：/skills remove <slug>")
+                        return True
+                    slug = args[1]
+                    skills_dir = self.workspace / "skills"
+                    target = skills_dir / slug
+                    removed = False
+                    try:
+                        if target.exists():
+                            if target.is_dir():
+                                import shutil
+                                shutil.rmtree(target)
+                            else:
+                                target.unlink()
+                            removed = True
+                    except Exception as e:
+                        await self._send_command_reply(msg, f"❌ 删除失败: {e}")
+                        return True
+                    try:
+                        from iflow_bot.utils.helpers import get_iflow_config_dir
+                        iflow_target = get_iflow_config_dir() / "skills" / slug
+                        if iflow_target.exists() and not iflow_target.is_symlink():
+                            if iflow_target.is_dir():
+                                import shutil
+                                shutil.rmtree(iflow_target)
+                            else:
+                                iflow_target.unlink()
+                    except Exception:
+                        pass
+                    await self._send_command_reply(msg, "✅ 已卸载" if removed else "⚠️ 未找到该技能")
+                    return True
+                else:
+                    subcmd = sub
+                    passthrough = args[1:]
+
+                skills_dir = self.workspace / "skills"
+                skills_dir.mkdir(parents=True, exist_ok=True)
+                cmdline = [
+                    skillhub,
+                    "--dir",
+                    str(skills_dir),
+                    "--skip-self-upgrade",
+                    subcmd,
+                ] + passthrough
                 prepared = prepare_subprocess_command(cmdline)
                 proc = await asyncio.create_subprocess_exec(
                     *prepared,
@@ -300,13 +460,30 @@ class AgentLoop:
                     stderr=asyncio.subprocess.PIPE,
                     cwd=str(self.workspace),
                 )
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+                code = proc.returncode
                 output = (stdout or b"").decode("utf-8", errors="replace").strip()
                 err = (stderr or b"").decode("utf-8", errors="replace").strip()
-                text = output or err or "无输出"
+                text = _strip_ansi(output or err or "无输出")
+
+                if subcmd == "search":
+                    text = _format_skillhub_search_output(text)
+                elif subcmd == "list":
+                    text = _format_skillhub_list_output(text)
+                elif subcmd == "install":
+                    slug = passthrough[0] if passthrough else ""
+                    text = _format_skillhub_install_output(text, slug)
+
                 if len(text) > 4000:
                     text = text[:4000] + "\n... (truncated)"
                 await self._send_command_reply(msg, text)
+
+                if code == 0 and subcmd in {"install", "upgrade"}:
+                    try:
+                        from iflow_bot.utils.helpers import sync_iflow_skills_dir
+                        sync_iflow_skills_dir(self.workspace)
+                    except Exception:
+                        pass
             except Exception as e:
                 await self._send_command_reply(msg, f"❌ skills 执行失败: {e}")
             return True

@@ -611,6 +611,35 @@ iflow-bot skill --help
 iflow-bot commands --help
 ```
 
+## 💬 聊天内指令
+
+这些命令在聊天窗口内发送（Telegram/飞书/钉钉等）：
+
+```
+/status                 查看状态（模型、会话、压缩次数）
+/new                    新建会话
+/compact                手动压缩当前会话
+/help                   查看帮助
+/cron list              查看定时任务
+/cron add ...           添加任务（参数见 /help）
+/cron delete <id>       删除任务
+/model set <name>       切换模型（新会话生效）
+/language <en-US|zh-CN> 设置语言
+/skills find <关键词>   搜索技能（SkillHub）
+/skills add <slug>      安装技能到 workspace/skills
+/skills list            查看已安装技能
+/skills remove <slug>   卸载技能
+/skills update          更新技能
+```
+
+## 🧰 SkillHub CLI（/skills 依赖）
+
+`/skills` 使用 SkillHub CLI，需在宿主机安装一次：
+
+```bash
+curl -fsSL https://skillhub-1388575217.cos.ap-guangzhou.myqcloud.com/install/install.sh | bash -s -- --cli-only
+```
+
 ## 📁 目录结构
 
 ```
