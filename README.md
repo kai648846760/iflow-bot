@@ -621,7 +621,7 @@ These commands are sent inside your chat app (Telegram/Feishu/DingTalk/etc.):
 /compact                Manually compact current conversation
 /help                   Show help
 /cron list              List scheduled tasks
-/cron add ...           Add a task (see /help for args)
+/cron add ...           Add a task (see /help for args). In chat, channel/to auto-filled and deliver defaults to true
 /cron delete <id>       Delete a task
 /model set <name>       Switch model for new sessions
 /language <en-US|zh-CN> Set language

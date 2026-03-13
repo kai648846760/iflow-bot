@@ -388,13 +388,22 @@ class AgentLoop:
                 else:
                     when = datetime.fromisoformat(at)
                     schedule = CronSchedule(kind="at", at_ms=int(when.timestamp() * 1000))
+                channel = opts.get("channel")
+                to = opts.get("to")
+                deliver_raw = opts.get("deliver")
+                if not channel and not to:
+                    channel = msg.channel
+                    to = msg.chat_id
+                    deliver = True if deliver_raw in {None, ""} else deliver_raw.lower() in {"1", "true", "yes"}
+                else:
+                    deliver = True if deliver_raw is None else deliver_raw.lower() in {"1", "true", "yes"}
                 job = cron.add_job(
                     name=name,
                     schedule=schedule,
                     message=message,
-                    deliver=opts.get("deliver", "").lower() in {"1", "true", "yes"},
-                    channel=opts.get("channel"),
-                    to=opts.get("to"),
+                    deliver=deliver,
+                    channel=channel,
+                    to=to,
                     delete_after_run=False,
                 )
                 await self._send_command_reply(msg, f"✅ 已添加任务 {job.id}")
