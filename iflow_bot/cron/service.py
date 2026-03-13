@@ -324,7 +324,11 @@ class CronService:
     
     def list_jobs(self, include_disabled: bool = False) -> list[CronJob]:
         """List all jobs."""
+        # Force reload from disk to get fresh data (important for CLI commands like cron list)
+        self._store = None
         store = self._load_store()
+        # Recompute next run times to ensure accurate display after gateway restart
+        self._recompute_next_runs()
         jobs = store.jobs if include_disabled else [j for j in store.jobs if j.enabled]
         return sorted(jobs, key=lambda j: j.state.next_run_at_ms or float('inf'))
     
