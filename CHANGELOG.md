@@ -15,6 +15,7 @@ All notable changes to this project will be documented in this file.
 - fix(cron): Auto-fill `deliver/channel/to` for chat `/cron add` when omitted so scheduled messages reply in the same chat by default.
 - fix(cron): Refresh `cron list` to recompute next-run state and update timeout/missed run status.
 - docs: Clarify chat cron defaults in command help.
+- feat(chat): Slash commands for status/help/new/compact/cron/model/skills/language with improved parsing & output.
 
 ## v0.3.8 - 2026-03-11
 
