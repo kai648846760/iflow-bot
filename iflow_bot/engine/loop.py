@@ -625,6 +625,23 @@ time: {now}
         
         return context
 
+    def _append_media_prompt(self, message: str, media: list[str]) -> str:
+        """Append media file hints so the agent can load images/files reliably."""
+        if not media:
+            return message
+
+        lines = [
+            "[用户发送了图片/文件，请读取以下本地路径进行识别，勿编造内容]",
+        ]
+        for item in media:
+            lines.append(f"- {item}")
+        lines.append("如无法读取，请说明原因并提示用户重新发送。")
+
+        prompt = "\n".join(lines)
+        if message:
+            return f"{message}\n\n{prompt}"
+        return prompt
+
     def _analyze_and_build_outbound(
         self,
         response: str,
@@ -767,6 +784,10 @@ time: {now}
                 channel_context = self._build_channel_context(msg)
                 if channel_context:
                     message_content = channel_context + "\n\n" + message_content
+
+                # 注入媒体文件路径（用于图片/文件识别）
+                if msg.media:
+                    message_content = self._append_media_prompt(message_content, msg.media)
                 
                 # 检查引导文件（优先 BOOTSTRAP.md，否则 AGENTS.md）
                 bootstrap_content, is_bootstrap = self._get_bootstrap_content()
