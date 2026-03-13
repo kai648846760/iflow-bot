@@ -8,6 +8,7 @@ All notable changes to this project will be documented in this file.
 - test(resilience): Add end-to-end resilience coverage for outbound-queue overflow behavior, per-user loop serialization, and Feishu streaming failure-path log classification.
 - test(concurrency-observability): Add chain-level assertions for cross-user parallel handling and streaming trace metadata consistency (`reply_to_id` on progress/end path).
 - fix(qq): Download incoming image attachments and inject image paths so QQ channel can perform image analysis via `image_read`.
+- fix(stdio): Prewarm ACP initialization/authentication at gateway start to reduce first-message latency.
 
 ## v0.3.8 - 2026-03-11
 
