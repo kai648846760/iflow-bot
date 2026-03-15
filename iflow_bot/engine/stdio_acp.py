@@ -676,11 +676,6 @@ class StdioACPClient:
                                 
                                 if on_tool_call:
                                     await on_tool_call(tc)
-
-                                if status.lower() in {"error", "failed", "cancelled"}:
-                                    error_message = output_text or f"Tool {tc.tool_name} failed"
-                                    if not future.done():
-                                        future.set_result({"error": {"message": error_message}})
                 
                 except asyncio.TimeoutError:
                     continue
@@ -740,7 +735,12 @@ class StdioACPClient:
             response.thought = "".join(thought_parts)
             response.tool_calls = list(tool_calls_map.values())
             
-            logger.debug(f"StdioACP prompt completed: stop_reason={response.stop_reason}")
+            logger.debug(
+                "StdioACP prompt completed: stop_reason={}, error={}, tool_calls={}",
+                response.stop_reason,
+                response.error,
+                len(response.tool_calls),
+            )
             
             return response
             
@@ -824,6 +824,7 @@ class StdioACPAdapter:
         self._memory_constraints_cache: Optional[str] = None
         self._active_compress_trigger_tokens = max(0, int(active_compress_trigger_tokens))
         self._active_compress_budget_tokens = 2200
+        self._auth_timeout_seconds = 5.0
         self._session_map_file = Path.home() / ".iflow-bot" / "session_mappings.json"
         self._session_lock = asyncio.Lock()
         self._load_session_map()
@@ -1041,25 +1042,60 @@ TOOLS.md - Your Tools（你的工具）定义了你可以使用的工具列表�
         return text
     
     async def connect(self) -> None:
-        if self._client is None:
-            self._client = StdioACPClient(
-                iflow_path=self.iflow_path,
-                workspace=self.workspace,
-                timeout=self.timeout,
-                mcp_proxy_port=self.mcp_proxy_port,
-                mcp_servers_auto_discover=self.mcp_servers_auto_discover,
-                mcp_servers_max=self.mcp_servers_max,
-                mcp_servers_allowlist=self.mcp_servers_allowlist,
-                mcp_servers_blocklist=self.mcp_servers_blocklist,
-                mcp_servers_cached=self.mcp_servers_cached,
-            )
-        
-        await self._client.start()
-        await self._client.initialize()
-        
-        authenticated = await self._client.authenticate("iflow")
-        if not authenticated:
-            logger.warning("StdioACP authentication failed, some features may not work")
+        if self._client is not None:
+            try:
+                if not await self._client.is_connected():
+                    await self._client.stop()
+                    self._client = None
+            except Exception:
+                try:
+                    await self._client.stop()
+                except Exception:
+                    pass
+                self._client = None
+
+        for attempt in range(2):
+            if self._client is None:
+                self._client = StdioACPClient(
+                    iflow_path=self.iflow_path,
+                    workspace=self.workspace,
+                    timeout=self.timeout,
+                    mcp_proxy_port=self.mcp_proxy_port,
+                    mcp_servers_auto_discover=self.mcp_servers_auto_discover,
+                    mcp_servers_max=self.mcp_servers_max,
+                    mcp_servers_allowlist=self.mcp_servers_allowlist,
+                    mcp_servers_blocklist=self.mcp_servers_blocklist,
+                    mcp_servers_cached=self.mcp_servers_cached,
+                )
+
+            try:
+                await self._client.start()
+                await self._client.initialize()
+
+                auth_timeout = self._auth_timeout_seconds
+                if self.timeout:
+                    auth_timeout = min(auth_timeout, float(self.timeout))
+                try:
+                    authenticated = await asyncio.wait_for(
+                        self._client.authenticate("iflow"),
+                        timeout=auth_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    authenticated = False
+                    logger.warning("StdioACP authentication timeout, continue without auth")
+
+                if not authenticated:
+                    logger.warning("StdioACP authentication failed, some features may not work")
+                return
+            except (ConnectionResetError, BrokenPipeError, StdioACPConnectionError, OSError) as exc:
+                logger.warning("StdioACP reconnecting after connection failure: {}", exc)
+                try:
+                    await self._client.stop()
+                except Exception:
+                    pass
+                self._client = None
+                if attempt >= 1:
+                    raise StdioACPConnectionError(f"Failed to connect stdio ACP: {exc}") from exc
     
     async def disconnect(self) -> None:
         if self._client:
@@ -1068,6 +1104,13 @@ TOOLS.md - Your Tools（你的工具）定义了你可以使用的工具列表�
     
     def _get_session_key(self, channel: str, chat_id: str) -> str:
         return f"{channel}:{chat_id}"
+
+    def _timeout_retry_budgets(self, timeout: Optional[int]) -> list[int]:
+        base = int(timeout or self.timeout or 600)
+        budgets = [base]
+        for _ in range(2):
+            budgets.append(budgets[-1] * 2)
+        return budgets
 
     def get_session_status(self, channel: str, chat_id: str) -> dict:
         key = self._get_session_key(channel, chat_id)
@@ -1708,26 +1751,31 @@ TOOLS.md - Your Tools（你的工具）定义了你可以使用的工具列表�
             key, channel, chat_id, session_id, message, model
         )
 
-        try:
-            response = await self._client.prompt(
-                session_id=session_id,
-                message=message,
-                timeout=timeout or self.timeout,
-            )
-        except StdioACPTimeoutError:
-            logger.warning(f"Prompt timeout, cancel and recreate session: {key}")
+        timeout_budgets = self._timeout_retry_budgets(timeout)
+        response = None
+        for attempt, budget in enumerate(timeout_budgets, start=1):
             try:
-                await self._client.cancel(session_id)
-            except Exception as e:
-                logger.debug(f"Failed to cancel timed-out session {session_id[:16]}...: {e}")
+                response = await self._client.prompt(
+                    session_id=session_id,
+                    message=message,
+                    timeout=budget,
+                )
+                break
+            except StdioACPTimeoutError:
+                if attempt >= len(timeout_budgets):
+                    raise
+                logger.warning(
+                    f"Prompt timeout, cancel and recreate session: {key} "
+                    f"(attempt {attempt}/{len(timeout_budgets)}, next timeout={timeout_budgets[attempt]}s)"
+                )
+                try:
+                    await self._client.cancel(session_id)
+                except Exception as e:
+                    logger.debug(f"Failed to cancel timed-out session {session_id[:16]}...: {e}")
 
-            await self._invalidate_session(key)
-            session_id = await self._create_new_session(key, model)
-            response = await self._client.prompt(
-                session_id=session_id,
-                message=message,
-                timeout=timeout or self.timeout,
-            )
+                await self._invalidate_session(key)
+                session_id = await self._create_new_session(key, model)
+        assert response is not None
         
         if response.error and "Invalid request" in response.error:
             logger.warning(f"Session invalid, recreating: {key}")
@@ -1846,33 +1894,35 @@ TOOLS.md - Your Tools（你的工具）定义了你可以使用的工具列表�
                 if asyncio.iscoroutine(result):
                     await result
 
-        try:
-            response = await self._client.prompt(
-                session_id=session_id,
-                message=message,
-                timeout=timeout or self.timeout,
-                on_chunk=handle_chunk,
-                on_tool_call=handle_tool_call,
-                on_event=handle_event,
-            )
-        except StdioACPTimeoutError:
-            logger.warning(f"Stream prompt timeout, cancel and recreate session: {key}")
+        timeout_budgets = self._timeout_retry_budgets(timeout)
+        response = None
+        for attempt, budget in enumerate(timeout_budgets, start=1):
             try:
-                await self._client.cancel(session_id)
-            except Exception as e:
-                logger.debug(f"Failed to cancel timed-out session {session_id[:16]}...: {e}")
+                response = await self._client.prompt(
+                    session_id=session_id,
+                    message=message,
+                    timeout=budget,
+                    on_chunk=handle_chunk,
+                    on_tool_call=handle_tool_call,
+                    on_event=handle_event,
+                )
+                break
+            except StdioACPTimeoutError:
+                if attempt >= len(timeout_budgets):
+                    raise
+                logger.warning(
+                    f"Stream prompt timeout, cancel and recreate session: {key} "
+                    f"(attempt {attempt}/{len(timeout_budgets)}, next timeout={timeout_budgets[attempt]}s)"
+                )
+                try:
+                    await self._client.cancel(session_id)
+                except Exception as e:
+                    logger.debug(f"Failed to cancel timed-out session {session_id[:16]}...: {e}")
 
-            await self._invalidate_session(key)
-            session_id = await self._create_new_session(key, model)
-            content_parts.clear()
-            response = await self._client.prompt(
-                session_id=session_id,
-                message=message,
-                timeout=timeout or self.timeout,
-                on_chunk=handle_chunk,
-                on_tool_call=handle_tool_call,
-                on_event=handle_event,
-            )
+                await self._invalidate_session(key)
+                session_id = await self._create_new_session(key, model)
+                content_parts.clear()
+        assert response is not None
         
         if response.error and "Invalid request" in response.error:
             logger.warning(f"Session invalid (stream), recreating: {key}")

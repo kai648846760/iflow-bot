@@ -623,6 +623,9 @@ These commands are sent inside your chat app (Telegram/Feishu/DingTalk/etc.):
 /cron list              List scheduled tasks
 /cron add ...           Add a task (see /help for args). In chat, channel/to auto-filled and deliver defaults to true
 /cron delete <id>       Delete a task
+/ralph "prompt"         Generate PRD for long task (asks clarifying questions first)
+/ralph answer <reply>   Answer Ralph clarifying questions
+/ralph approve|stop|status  Control Ralph loop
 /model set <name>       Switch model for new sessions
 /language <en-US|zh-CN> Set language
 /skills find <keyword>  Search skills (SkillHub)

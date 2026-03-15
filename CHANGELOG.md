@@ -10,6 +10,10 @@ All notable changes to this project will be documented in this file.
 - fix(qq): Download incoming image attachments and inject image paths so QQ channel can perform image analysis via `image_read`.
 - fix(stdio): Prewarm ACP initialization/authentication at gateway start to reduce first-message latency.
 
+## v0.4.3 - 2026-03-14
+
+- feat(ralph): Add /ralph loop with PRD approval, subagent iterations, progress streaming, and stop/status controls.
+
 ## v0.4.2 - 2026-03-13
 
 - fix(media): Save inbound images to workspace/images for Feishu/Telegram/Discord and normalize media paths before invoking iflow.

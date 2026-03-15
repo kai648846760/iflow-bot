@@ -46,14 +46,25 @@ class _TrackingAdapter:
 
 
 @pytest.mark.asyncio
-async def test_bus_queue_overflow_drops_extra_messages():
+async def test_bus_queue_overflow_applies_backpressure_instead_of_dropping():
     bus = MessageBus(max_size=1)
     await bus.publish_outbound(OutboundMessage(channel='telegram', chat_id='c1', content='m1'))
-    await bus.publish_outbound(OutboundMessage(channel='telegram', chat_id='c1', content='m2'))
 
+    second_publish = asyncio.create_task(
+        bus.publish_outbound(OutboundMessage(channel='telegram', chat_id='c1', content='m2'))
+    )
+    await asyncio.sleep(0.05)
+
+    assert second_publish.done() is False
     assert bus.outbound_size == 1
+
     first = await bus.consume_outbound()
     assert first.content == 'm1'
+
+    await asyncio.wait_for(second_publish, timeout=1)
+    assert bus.outbound_size == 1
+    second = await bus.consume_outbound()
+    assert second.content == 'm2'
 
 
 @pytest.mark.asyncio

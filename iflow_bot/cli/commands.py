@@ -139,6 +139,54 @@ def get_templates_dir() -> Path:
     return Path(__file__).parent.parent / "templates"
 
 
+def get_running_gateway_pid() -> Optional[int]:
+    """Return live gateway PID from pid file, or None when absent/stale."""
+    pid_file = get_pid_file()
+    if not pid_file.exists():
+        return None
+
+    try:
+        pid = int(pid_file.read_text().strip())
+    except ValueError:
+        return None
+
+    return pid if process_exists(pid) else None
+
+
+def write_gateway_pid(pid: int) -> None:
+    pid_file = get_pid_file()
+    pid_file.parent.mkdir(parents=True, exist_ok=True)
+    pid_file.write_text(str(pid), encoding="utf-8")
+
+
+def clear_gateway_pid(pid: Optional[int] = None) -> None:
+    pid_file = get_pid_file()
+    if not pid_file.exists():
+        return
+    if pid is None:
+        pid_file.unlink(missing_ok=True)
+        return
+
+    try:
+        current = int(pid_file.read_text().strip())
+    except Exception:
+        pid_file.unlink(missing_ok=True)
+        return
+
+    if current == pid:
+        pid_file.unlink(missing_ok=True)
+
+
+def claim_gateway_pid() -> Optional[int]:
+    """Claim gateway pid file for current process, or return live foreign PID."""
+    current_pid = os.getpid()
+    running_pid = get_running_gateway_pid()
+    if running_pid is not None and running_pid != current_pid:
+        return running_pid
+    write_gateway_pid(current_pid)
+    return None
+
+
 # ============================================================================
 # iflow 检查
 # ============================================================================
@@ -667,16 +715,11 @@ def gateway_start(
     init_workspace(workspace)
 
     # 检查是否已运行
-    pid_file = get_pid_file()
-    if pid_file.exists():
-        try:
-            pid = int(pid_file.read_text().strip())
-            if process_exists(pid):
-                console.print(f"[yellow]Gateway already running (PID: {pid})[/yellow]")
-                console.print("Use [cyan]iflow-bot gateway restart[/cyan] to restart")
-                return
-        except ValueError:
-            pass
+    running_pid = get_running_gateway_pid()
+    if running_pid is not None:
+        console.print(f"[yellow]Gateway already running (PID: {running_pid})[/yellow]")
+        console.print("Use [cyan]iflow-bot gateway restart[/cyan] to restart")
+        return
 
     enabled_channels = config.get_enabled_channels()
     if not enabled_channels:
@@ -703,13 +746,18 @@ def gateway_start(
             )
         
         # 保存 PID
-        pid_file.write_text(str(process.pid))
+        write_gateway_pid(process.pid)
         
         console.print(f"[green]{_OK_MARK}[/green] Gateway started (PID: {process.pid})")
         console.print(f"[dim]Log file: {log_file}[/dim]")
     else:
         # 前台运行
-        asyncio.run(_run_gateway(config))
+        current_pid = os.getpid()
+        write_gateway_pid(current_pid)
+        try:
+            asyncio.run(_run_gateway(config))
+        finally:
+            clear_gateway_pid(current_pid)
 
 
 @gateway_app.command("run")
@@ -720,6 +768,12 @@ def gateway_run(
     print_banner()
 
     config = load_config()
+
+    running_pid = get_running_gateway_pid()
+    if running_pid is not None:
+        console.print(f"[yellow]Gateway already running (PID: {running_pid})[/yellow]")
+        console.print("Use [cyan]iflow-bot gateway restart[/cyan] to restart")
+        return
 
     # 检查并启动 MCP 代理（与 gateway start 保持一致）
     should_start_mcp = config.driver.mcp_proxy_auto_start if hasattr(config, "driver") and config.driver else True
@@ -754,7 +808,12 @@ def gateway_run(
     console.print(f"[bold]Model:[/bold] {config.get_model()}")
     console.print()
     
-    asyncio.run(_run_gateway(config, verbose=verbose))
+    current_pid = os.getpid()
+    write_gateway_pid(current_pid)
+    try:
+        asyncio.run(_run_gateway(config, verbose=verbose))
+    finally:
+        clear_gateway_pid(current_pid)
 
 
 @gateway_app.command("stop")
@@ -774,10 +833,10 @@ def gateway_stop() -> None:
         else:
             os.kill(pid, signal.SIGTERM)
         console.print(f"[green]{_OK_MARK}[/green] Gateway stopped (PID: {pid})")
-        pid_file.unlink()
+        clear_gateway_pid(pid)
     except ProcessLookupError:
         console.print("[yellow]Gateway process not found[/yellow]")
-        pid_file.unlink()
+        clear_gateway_pid()
     except Exception as e:
         console.print(f"[red]Error stopping gateway: {e}[/red]")
 
@@ -869,8 +928,17 @@ async def _stop_acp_server(process: asyncio.subprocess.Process) -> None:
 @app.command("_run_gateway", hidden=True)
 def _run_gateway_cmd():
     """内部命令：运行 Gateway。"""
+    running_pid = claim_gateway_pid()
+    if running_pid is not None:
+        console.print(f"[yellow]Gateway already running (PID: {running_pid})[/yellow]")
+        console.print("Use [cyan]iflow-bot gateway restart[/cyan] to restart")
+        return
     config = load_config()
-    asyncio.run(_run_gateway(config))
+    current_pid = os.getpid()
+    try:
+        asyncio.run(_run_gateway(config))
+    finally:
+        clear_gateway_pid(current_pid)
 
 
 async def _run_gateway(config, verbose: bool = False) -> None:
@@ -964,6 +1032,9 @@ async def _run_gateway(config, verbose: bool = False) -> None:
             console.print(f"[green]{_OK_MARK}[/green] Stdio ACP 预热完成")
         except Exception as e:
             console.print(f"[yellow]Stdio ACP 预热失败，将在首条消息时重试: {e}[/yellow]")
+            if adapter._stdio_adapter is not None:
+                await adapter._stdio_adapter.disconnect()
+                adapter._stdio_adapter = None
     
     bus = MessageBus()
     channel_manager = ChannelManager(config, bus)
@@ -1074,8 +1145,8 @@ async def _run_gateway(config, verbose: bool = False) -> None:
         # 启动服务
         await cron.start()
         await heartbeat.start()
-        await channel_manager.start_all()
         await agent_loop.start_background()
+        await channel_manager.start_all()
         
         # 显示状态
         console.print(f"[bold green]{_OK_MARK} Gateway 运行中！[/bold green]")

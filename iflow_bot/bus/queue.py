@@ -63,16 +63,20 @@ class MessageBus:
             logger.warning("Bus is stopped, dropping inbound message")
             return
         
-        try:
-            self._inbound.put_nowait(msg)
-            logger.debug(f"Published inbound message from {msg.channel}:{msg.chat_id}")
-            
-            # Record the inbound message
-            recorder = self._get_recorder()
-            if recorder:
-                recorder.record_inbound(msg)
-        except asyncio.QueueFull:
-            logger.warning("Inbound queue full, dropping message")
+        if self._inbound.full():
+            logger.warning(
+                "Inbound queue full, applying backpressure before enqueue: {}:{}",
+                msg.channel,
+                msg.chat_id,
+            )
+
+        await self._inbound.put(msg)
+        logger.debug(f"Published inbound message from {msg.channel}:{msg.chat_id}")
+
+        # Record the inbound message
+        recorder = self._get_recorder()
+        if recorder:
+            recorder.record_inbound(msg)
     
     async def consume_inbound(self, timeout: Optional[float] = None) -> InboundMessage:
         """
@@ -102,16 +106,20 @@ class MessageBus:
             logger.warning("Bus is stopped, dropping outbound message")
             return
         
-        try:
-            self._outbound.put_nowait(msg)
-            logger.debug(f"Published outbound message to {msg.channel}:{msg.chat_id}")
-            
-            # Record the outbound message
-            recorder = self._get_recorder()
-            if recorder:
-                recorder.record_outbound(msg)
-        except asyncio.QueueFull:
-            logger.warning("Outbound queue full, dropping message")
+        if self._outbound.full():
+            logger.warning(
+                "Outbound queue full, applying backpressure before enqueue: {}:{}",
+                msg.channel,
+                msg.chat_id,
+            )
+
+        await self._outbound.put(msg)
+        logger.debug(f"Published outbound message to {msg.channel}:{msg.chat_id}")
+
+        # Record the outbound message
+        recorder = self._get_recorder()
+        if recorder:
+            recorder.record_outbound(msg)
     
     async def consume_outbound(self, timeout: Optional[float] = None) -> OutboundMessage:
         """

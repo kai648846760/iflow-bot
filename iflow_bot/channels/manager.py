@@ -79,6 +79,7 @@ class ChannelManager:
         self.config = config
         self.bus = bus
         self._channels: dict[str, BaseChannel] = {}
+        self._channel_tasks: dict[str, asyncio.Task] = {}
         self._outbound_task: Optional[asyncio.Task] = None
 
     @property
@@ -149,6 +150,12 @@ class ChannelManager:
                 # 使用 create_task 非阻塞启动
                 task = asyncio.create_task(channel.start())
                 self._channels[name] = channel
+                self._channel_tasks[name] = task
+                task.add_done_callback(
+                    lambda done_task, channel_name=name: self._on_channel_start_done(
+                        channel_name, done_task
+                    )
+                )
                 tasks.append((name, task, channel))
                 logger.info(f"Channel '{name}' start task created")
 
@@ -166,6 +173,7 @@ class ChannelManager:
                 except Exception as e:
                     logger.error(f"Channel '{name}' failed to start: {e}")
                     self._channels.pop(name, None)
+                    self._channel_tasks.pop(name, None)
 
         # 启动出站消息监听任务
         if self._channels:
@@ -196,6 +204,7 @@ class ChannelManager:
                 logger.error(f"Error stopping channel '{name}': {e}")
 
         self._channels.clear()
+        self._channel_tasks.clear()
 
     async def send_to(self, channel: str, msg: OutboundMessage) -> None:
         """发送消息到指定渠道。
@@ -270,3 +279,16 @@ class ChannelManager:
             for name, ch in self._channels.items()
         }
         return f"<ChannelManager channels={channels_status}>"
+
+    def _on_channel_start_done(self, name: str, task: asyncio.Task) -> None:
+        """Consume channel start task results so late startup failures stay contained."""
+        self._channel_tasks.pop(name, None)
+        if task.cancelled():
+            logger.warning(f"Channel '{name}' start task cancelled")
+            self._channels.pop(name, None)
+            return
+        try:
+            task.result()
+        except Exception as e:
+            logger.error(f"Channel '{name}' failed to start: {e}")
+            self._channels.pop(name, None)

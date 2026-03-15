@@ -623,6 +623,9 @@ iflow-bot commands --help
 /cron list              查看定时任务
 /cron add ...           添加任务（参数见 /help）。在聊天里会自动补齐 channel/to，且默认 deliver=true
 /cron delete <id>       删除任务
+/ralph "prompt"         生成长任务 PRD（会先提澄清问题）
+/ralph answer <回复>      回答 Ralph 澄清问题
+/ralph approve|stop|status  控制 Ralph loop
 /model set <name>       切换模型（新会话生效）
 /language <en-US|zh-CN> 设置语言
 /skills find <关键词>   搜索技能（SkillHub）
