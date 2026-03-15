@@ -615,25 +615,81 @@ iflow-bot commands --help
 
 这些命令在聊天窗口内发送（Telegram/飞书/钉钉等）：
 
+```text
+/status
+/new
+/compact
+/help
+/cron list
+/cron add --name <name> --message <text> (--every <秒> | --cron "<表达式>" | --at "<ISO时间>") [--tz <时区>] [--channel <渠道>] [--to <chat_id>] [--deliver true|false]
+/cron delete <id>
+/model set <name>
+/language <en-US|zh-CN>
+/skills find <关键词>
+/skills add <slug>
+/skills list
+/skills remove <slug>
+/skills update
+/ralph "<prompt>"
+/ralph answer <回复>
+/ralph approve
+/ralph status
+/ralph stop
+/ralph resume
 ```
-/status                 查看状态（模型、会话、压缩次数）
-/new                    新建会话
-/compact                手动压缩当前会话
-/help                   查看帮助
-/cron list              查看定时任务
-/cron add ...           添加任务（参数见 /help）。在聊天里会自动补齐 channel/to，且默认 deliver=true
-/cron delete <id>       删除任务
-/ralph "prompt"         生成长任务 PRD（会先提澄清问题）
-/ralph answer <回复>      回答 Ralph 澄清问题
-/ralph approve|stop|status  控制 Ralph loop
-/model set <name>       切换模型（新会话生效）
-/language <en-US|zh-CN> 设置语言
-/skills find <关键词>   搜索技能（SkillHub）
-/skills add <slug>      安装技能到 workspace/skills
-/skills list            查看已安装技能
-/skills remove <slug>   卸载技能
-/skills update          更新技能
-```
+
+`/status`
+- 展示当前适配器模式、模型、流式开关、语言、workspace 路径、stdio session id、上下文 token 估算、压缩次数。
+
+`/new`
+- 开启新会话，并清空上一轮运行态会话上下文。
+
+`/compact`
+- 手动压缩当前 stdio 会话。
+
+`/cron`
+- `list`：查看全部任务。
+- `add`：如果聊天里未显式传 `--channel` 和 `--to`，机器人会自动补齐当前渠道和 chat_id，且默认 `--deliver true`。
+- `delete`：按 id 删除任务。
+
+`/model set <name>`
+- 持久化新的默认模型，对新会话生效。
+
+`/language <en-US|zh-CN>`
+- 将语言设置写入 `workspace/.iflow/settings.json`。
+- 系统回复和命令输出都会遵循该语言。
+
+`/skills`
+- 基于 SkillHub CLI。
+- `add` 会安装到 `workspace/skills`，随后自动同步到 `~/.iflow/skills`。
+- `remove` 会从这两个位置一起移除。
+- 如果本机没有 SkillHub CLI，机器人会先尝试自动安装。
+
+## 🧠 Ralph 使用流程
+
+`/ralph` 是一个带人工审核的长任务 loop，不会在你发出 prompt 后立刻执行。
+
+1. `/ralph "<prompt>"`
+   - 创建 Ralph run。
+   - 如有需要会先提出澄清问题。
+2. `/ralph answer <回复>`
+   - 提交澄清问题答案。
+   - 机器人会生成 `prd.json` 和 markdown 版 PRD。
+3. 先在聊天里审核完整 PRD 输出，必要时也可直接查看保存下来的文件。
+4. `/ralph approve`
+   - 仅在审批通过后才正式开始执行。
+5. `/ralph status`
+   - 展示当前状态、run id、当前 story/pass、story id、子角色、当前阶段。
+6. `/ralph stop`
+   - 停止当前 run，并取消正在运行的 Ralph 子会话。
+7. `/ralph resume`
+   - 从上次保存的位置恢复最近一个未完成的 run。
+
+Ralph 行为说明：
+- 同一个聊天内同一时间只允许一个 Ralph run 执行。
+- Gateway 重启后，会自动继续该聊天中未完成的 Ralph run。
+- Ralph 使用独立的 stdio adapter，因此执行长任务时，`/help`、`/status` 这类普通命令仍可响应。
+- PRD 预览过长时会自动分段发送，而不是直接截断。
 
 ## 🧰 SkillHub CLI（/skills 依赖）
 
@@ -648,25 +704,38 @@ curl -fsSL https://skillhub-1388575217.cos.ap-guangzhou.myqcloud.com/install/ins
 
 ```
 ~/.iflow-bot/
-├── botpy.log                # QQ bot 日志
-├── config.json              # 配置文件
-├── gateway.pid              # PID 文件（后台运行）
-├── gateway.log              # Gateway 日志
-├── session_mappings.json    # Session 会话映射
-├── workspace/               # iflow 工作空间
-│   ├── AGENTS.md            # Agent 行为指南
-│   ├── BOOT.md              # 启动配置
-│   ├── HEARTBEAT.md         # 心跳任务
-│   ├── IDENTITY.md          # 身份标识
-│   ├── SOUL.md              # AI 人格定义
-│   ├── TOOLS.md             # 工具配置
-│   ├── USER.md              # 用户信息
-│   └── memory/              # 记忆目录
-│       └── MEMORY.md        # 长期记忆
-└── data/                    # 数据目录
-    └── cron/                # 定时任务
-        └── jobs.json        # 任务数据
+├── config.json                    # 机器人配置文件
+├── gateway.log                    # Gateway 日志
+├── gateway.pid                    # 后台运行 PID 文件
+├── botpy.log                      # QQ SDK 日志（启用 QQ 时）
+├── data/
+│   ├── cron/
+│   │   └── jobs.json              # 定时任务存储
+│   ├── media/                     # 下载的媒体缓存
+│   └── sessions/                  # 会话元数据缓存
+└── workspace/
+    ├── .iflow/
+    │   └── settings.json          # 每个 workspace 的语言与 iflow 设置
+    ├── AGENTS.md                  # Agent 指令
+    ├── BOOTSTRAP.md               # 首次启动引导文件（可选）
+    ├── HEARTBEAT.md               # 心跳提示词（可选）
+    ├── IDENTITY.md                # 身份提示词（可选）
+    ├── SOUL.md                    # 人格提示词（可选）
+    ├── TOOLS.md                   # 工具策略提示词（可选）
+    ├── USER.md                    # 用户资料提示词（可选）
+    ├── channel/
+    │   └── <channel>/<chat>-<date>.json  # 聊天记录归档
+    ├── images/                    # 调用 iflow 前下载的入站图片
+    ├── memory/
+    │   └── MEMORY.md              # 长期记忆
+    ├── project/                   # Ralph 任务产出的目标项目目录
+    ├── ralph/
+    │   └── <chat_id>/<run_id>/    # Ralph 的 PRD、状态、进度文件
+    └── skills/                    # 已安装技能，并同步到 ~/.iflow/skills
 ```
+
+`workspace/skills` 是技能安装的真实来源目录。
+机器人会把它同步到 iflow CLI 的技能目录（Linux 下一般是 `~/.iflow/skills`），这样 Ralph 子会话也能加载同一批技能。
 
 ## 🔧 开发
 

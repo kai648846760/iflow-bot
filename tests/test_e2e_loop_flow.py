@@ -26,6 +26,7 @@ class FakeAdapter:
         self.stream_calls: list[dict] = []
         self._stream_chunks: list[str] = []
         self._stream_response: str = ""
+        self._pre_chunk_delay: float = 0.0
 
     async def chat(self, message: str, channel: str, chat_id: str, model: str):
         self.chat_calls.append(
@@ -47,6 +48,8 @@ class FakeAdapter:
                 "model": model,
             }
         )
+        if self._pre_chunk_delay > 0:
+            await asyncio.sleep(self._pre_chunk_delay)
         for chunk in self._stream_chunks:
             await on_chunk(channel, chat_id, chunk)
         return self._stream_response
@@ -93,7 +96,7 @@ async def test_e2e_new_command_clears_session_and_ack():
     await loop._process_message(msg)
 
     out = await bus.consume_outbound()
-    assert "已开始新对话" in out.content
+    assert "已开启新会话" in out.content
     assert adapter.session_mappings.cleared == [("telegram", "c1")]
 
 
@@ -135,6 +138,95 @@ async def test_e2e_streaming_flow_emits_progress_and_end(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_e2e_streaming_flow_does_not_duplicate_final_content(monkeypatch):
+    bus = MessageBus()
+    adapter = FakeAdapter(mode="cli")
+    adapter._stream_chunks = ["hello", " world"]
+    adapter._stream_response = "hello world"
+
+    loop = AgentLoop(bus=bus, adapter=adapter, model="kimi-k2.5", streaming=True)
+
+    monkeypatch.setattr("iflow_bot.engine.loop.STREAM_BUFFER_MIN", 1)
+    monkeypatch.setattr("iflow_bot.engine.loop.STREAM_BUFFER_MAX", 1)
+
+    msg = InboundMessage(
+        channel="telegram",
+        sender_id="u1",
+        chat_id="c1",
+        content="stream me",
+        metadata={"message_id": "m3"},
+    )
+
+    await loop._process_message(msg)
+
+    outs = []
+    while bus.outbound_size:
+        outs.append(await bus.consume_outbound())
+
+    streaming_contents = [o.content for o in outs if o.metadata.get("_streaming")]
+    assert streaming_contents == ["hello", "hello world"]
+
+
+@pytest.mark.asyncio
+async def test_send_command_reply_streaming_uses_incremental_chunks(monkeypatch):
+    bus = MessageBus()
+    adapter = FakeAdapter(mode="cli")
+    loop = AgentLoop(bus=bus, adapter=adapter, model="kimi-k2.5", streaming=True)
+
+    monkeypatch.setattr(loop, "_split_command_message", lambda content, max_len=2000: ["part-1", "part-2"])
+
+    msg = InboundMessage(
+        channel="telegram",
+        sender_id="u1",
+        chat_id="c1",
+        content="/help",
+        metadata={"message_id": "m5"},
+    )
+
+    await loop._send_command_reply(msg, "very long content", streaming=True)
+
+    outs = []
+    while bus.outbound_size:
+        outs.append(await bus.consume_outbound())
+
+    streaming_contents = [o.content for o in outs if o.metadata.get("_streaming")]
+    assert streaming_contents == ["part-1", "part-2"]
+    assert any(o.metadata.get("_streaming_end") for o in outs)
+
+
+@pytest.mark.asyncio
+async def test_e2e_streaming_flow_emits_placeholder_when_first_chunk_is_slow(monkeypatch):
+    bus = MessageBus()
+    adapter = FakeAdapter(mode="cli")
+    adapter._stream_chunks = ["hello"]
+    adapter._stream_response = "hello"
+    adapter._pre_chunk_delay = 0.05
+
+    loop = AgentLoop(bus=bus, adapter=adapter, model="kimi-k2.5", streaming=True)
+
+    monkeypatch.setattr("iflow_bot.engine.loop.STREAM_BUFFER_MIN", 1)
+    monkeypatch.setattr("iflow_bot.engine.loop.STREAM_BUFFER_MAX", 1)
+    monkeypatch.setattr("iflow_bot.engine.loop.STREAM_FIRST_CHUNK_WARN_AFTER", 0.01, raising=False)
+
+    msg = InboundMessage(
+        channel="feishu",
+        sender_id="u1",
+        chat_id="c1",
+        content="slow start",
+        metadata={"message_id": "m6"},
+    )
+
+    await loop._process_message(msg)
+
+    outs = []
+    while bus.outbound_size:
+        outs.append(await bus.consume_outbound())
+
+    assert any(o.metadata.get("_streaming_placeholder") for o in outs), "should emit waiting placeholder"
+    assert any(o.content == "hello" for o in outs if o.metadata.get("_streaming")), "should still emit final streaming content"
+
+
+@pytest.mark.asyncio
 async def test_e2e_streaming_empty_response_fallback():
     bus = MessageBus()
     adapter = FakeAdapter(mode="cli")
@@ -154,5 +246,5 @@ async def test_e2e_streaming_empty_response_fallback():
     await loop._process_message(msg)
 
     out = await bus.consume_outbound()
-    assert "本轮未产出可见文本" in out.content
+    assert "OK:non-stream" in out.content
     assert out.metadata.get("reply_to_id") == "m4"

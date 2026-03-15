@@ -4,15 +4,22 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## v0.4.4 - 2026-03-16
+
+- feat(ralph): Add `/ralph resume`, richer `/ralph status` progress details, natural-language progress query routing, and automatic resume after gateway restart for unfinished runs.
+- fix(ralph): Run Ralph subagents on a dedicated stdio adapter so the main chat session stays responsive while long tasks execute.
+- fix(ralph): Add execution watchdogs and recovery retries for active prompts that never go idle, including targeted dependency hints such as missing `httpx` in verification flows.
+- fix(ralph): Synthesize missing acceptance criteria and tighter artifact path detection so researcher/writer/engineer stories produce usable deliverables more reliably.
+- feat(chat): Add a waiting hint for slow first streaming chunks and keep progress/status text aligned with the configured chat language.
+- docs: Expand chat command and Ralph workflow documentation in both README files, including exact supported slash commands.
+
+## v0.4.3 - 2026-03-15
+
 - test(recovery): Add end-to-end recovery-path coverage for active compression rotation, stream empty-response compact retry, and non-stream context-overflow compact retry.
 - test(resilience): Add end-to-end resilience coverage for outbound-queue overflow behavior, per-user loop serialization, and Feishu streaming failure-path log classification.
 - test(concurrency-observability): Add chain-level assertions for cross-user parallel handling and streaming trace metadata consistency (`reply_to_id` on progress/end path).
 - fix(qq): Download incoming image attachments and inject image paths so QQ channel can perform image analysis via `image_read`.
 - fix(stdio): Prewarm ACP initialization/authentication at gateway start to reduce first-message latency.
-
-## v0.4.3 - 2026-03-14
-
-- feat(ralph): Add /ralph loop with PRD approval, subagent iterations, progress streaming, and stop/status controls.
 
 ## v0.4.2 - 2026-03-13
 

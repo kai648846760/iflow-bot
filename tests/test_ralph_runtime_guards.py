@@ -56,6 +56,7 @@ class _FakeRalphClient:
         self._responses = list(responses or [])
         self.prompts = []
         self.create_session_calls = []
+        self.cancel_calls = []
 
     async def create_session(self, **kwargs):
         self.create_session_calls.append(kwargs)
@@ -75,6 +76,10 @@ class _FakeRalphClient:
         if self._after_prompt is not None:
             asyncio.create_task(self._after_prompt())
         return ACPResponse(content="我来开始执行当前任务。", error="Tool shell failed")
+
+    async def cancel(self, session_id):
+        self.cancel_calls.append(session_id)
+        return None
 
 
 class _HangingRalphClient(_FakeRalphClient):
@@ -101,6 +106,26 @@ class _RecoveryHeartbeatClient(_FakeRalphClient):
             if on_tool_call is not None:
                 await on_tool_call()
         return ACPResponse(content="恢复完成", error=None)
+
+
+class _BusyHeartbeatRalphClient(_FakeRalphClient):
+    async def prompt(
+        self,
+        session_id,
+        message,
+        timeout,
+        on_chunk=None,
+        on_tool_call=None,
+        on_event=None,
+    ):
+        self.prompts.append(message)
+        try:
+            while True:
+                await asyncio.sleep(0.02)
+                if on_event is not None:
+                    await on_event()
+        except asyncio.CancelledError:
+            raise
 
 
 class _FakeRalphStdio:
@@ -259,6 +284,131 @@ def test_ralph_subagent_prompt_forbids_internet_when_task_requires_local_sources
     assert "Do not access the internet" in prompt
 
 
+def test_ralph_expected_artifact_paths_detects_standalone_readme_filename(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(workspace), model="glm-5", streaming=False)
+    project_dir = workspace / "project" / "ralph-docs-e2e"
+
+    story = {
+        "id": "US-005",
+        "title": "项目概述与文档索引",
+        "description": "作为 writer，我希望输出 README.md，以便跨职能团队了解项目全貌与文档导航。",
+        "acceptanceCriteria": [
+            "完成 README.md 初稿",
+            "包含项目背景、目标、文档索引与快速导航",
+            "文档结构清晰，语言简洁，适合跨职能团队阅读",
+        ],
+        "role": "writer",
+    }
+
+    paths = loop._ralph_expected_artifact_paths(story, project_dir)
+
+    assert project_dir / "README.md" in paths
+    assert project_dir / "docs" / "US-005-researcher-notes.md" not in paths
+
+
+@pytest.mark.asyncio
+async def test_ralph_resume_does_not_autofinalize_writer_story_from_unrelated_project_files(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    bus = MessageBus()
+    channel = _FakeChannel()
+
+    run_id = "run-writer-resume-1"
+    chat_id = "ou_test"
+    run_dir = workspace / "ralph" / chat_id / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    project_dir = workspace / "project" / "ralph-docs-e2e"
+    docs_dir = project_dir / "docs"
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    (docs_dir / "compare.md").write_text("# compare\n", encoding="utf-8")
+    (docs_dir / "research-notes.md").write_text("# notes\n", encoding="utf-8")
+    (docs_dir / "risks.md").write_text("# risks\n", encoding="utf-8")
+
+    prd_path = run_dir / "prd.json"
+    progress_path = run_dir / "progress.txt"
+    progress_path.write_text("# Ralph Progress\nRESUMED\n", encoding="utf-8")
+    prd_path.write_text(
+        json.dumps(
+            {
+                "stories": [
+                    {
+                        "id": "US-005",
+                        "title": "项目概述与文档索引",
+                        "description": "作为 writer，我希望输出 README.md，以便跨职能团队了解项目全貌与文档导航。",
+                        "role": "writer",
+                        "acceptanceCriteria": [
+                            "完成 README.md 初稿",
+                            "包含项目背景、目标、文档索引与快速导航",
+                        ],
+                        "passes": False,
+                    }
+                ]
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    fake_client = _HangingRalphClient()
+    adapter = _FakeRalphAdapter(workspace, _FakeRalphStdio(fake_client))
+    loop = AgentLoop(
+        bus=bus,
+        adapter=adapter,
+        model="glm-5",
+        streaming=False,
+        channel_manager=_FakeChannelManager(channel),
+    )
+    loop._ralph_prompt_poll_seconds = 0.02
+    loop._ralph_artifact_watchdog_seconds = 0.05
+    loop._ralph_story_settle_timeout_seconds = 0.05
+    loop._ralph_idle_watchdog_seconds = lambda story, base_seconds: 0.1  # type: ignore[method-assign]
+    loop._ralph_recovery_idle_watchdog_seconds_for_attempt = lambda story, base_seconds, latest_output="": 0.1  # type: ignore[method-assign]
+    loop._get_ralph_stdio_adapter = lambda: asyncio.sleep(0, result=adapter._stdio)  # type: ignore[method-assign]
+    loop._ralph_retry_incomplete_story = lambda **kwargs: asyncio.sleep(0, result=ACPResponse(content="恢复失败", error="Prompt timeout (idle)"))  # type: ignore[method-assign]
+
+    async def _verification_failed(project_dir: Path, story: dict) -> bool:
+        return False
+
+    loop._ralph_verification_passed = _verification_failed  # type: ignore[method-assign]
+
+    loop._ralph_set_current(chat_id, run_id)
+    loop._ralph_save_state(
+        run_dir,
+        {
+            "run_id": run_id,
+            "status": "approved",
+            "channel": "feishu",
+            "story_index": 0,
+            "pass_index": 0,
+            "project_dir": str(project_dir),
+            "current_started_at": time.time() - 10,
+            "current_story_index": 1,
+            "current_story_total": 1,
+            "current_pass_index": 1,
+            "current_pass_total": 1,
+            "current_story_title": "项目概述与文档索引",
+            "current_story_role": "writer",
+        },
+    )
+
+    task = asyncio.create_task(loop._ralph_run_loop("feishu", chat_id, run_dir))
+    await asyncio.sleep(0.3)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    state = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+    story = json.loads(prd_path.read_text(encoding="utf-8"))["stories"][0]
+
+    assert story["passes"] is False
+    assert state["status"] == "running"
+    assert state["current_phase"] in {"executing", "recovery", "recovery_wait"}
+    assert fake_client.prompts
+    assert not (project_dir / "README.md").exists()
+
+
 def test_ralph_researcher_prompt_requires_docs_only_outputs(tmp_path: Path):
     loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(tmp_path / "workspace"), model="glm-5", streaming=False)
     run_dir = tmp_path / "workspace" / "ralph" / "chat" / "run-1"
@@ -336,6 +486,121 @@ def test_ralph_targeted_story_hints_cover_scaffold_dependency_gaps(tmp_path: Pat
     assert "mypy" in hints
     assert "fastapi" in hints.lower()
     assert "jinja2" in hints.lower()
+
+
+def test_ralph_targeted_story_hints_add_httpx_fix_for_fastapi_testclient_error(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    project_dir = workspace / "project" / "demo"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "pyproject.toml").write_text(
+        "[project]\nname='demo'\nversion='0.1.0'\ndependencies=['fastapi']\n"
+        "[dependency-groups]\ndev=['pytest','mypy']\n",
+        encoding="utf-8",
+    )
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(workspace), model="glm-5", streaming=False)
+
+    hints = loop._ralph_targeted_story_hints(
+        story={
+            "id": "US-003",
+            "title": "REST API 接口实现",
+            "role": "engineer",
+            "acceptanceCriteria": [
+                "实现 GET /api/tasks",
+                "Tests pass",
+                "Typecheck passes",
+            ],
+        },
+        project_dir=project_dir,
+        latest_output=(
+            "RuntimeError: The starlette.testclient module requires the httpx package to be installed.\n"
+            "E   ModuleNotFoundError: No module named httpx"
+        ),
+    )
+
+    assert "httpx" in hints.lower()
+    assert "uv add --dev httpx" in hints
+
+
+def test_ralph_status_current_lines_include_phase_and_role(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    _set_language(workspace, "zh-CN")
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(workspace), model="glm-5", streaming=False)
+
+    lines = loop._ralph_status_current_lines(
+        {
+            "current_story_index": 3,
+            "current_story_total": 8,
+            "current_pass_index": 1,
+            "current_pass_total": 1,
+            "current_story_title": "REST API 接口实现",
+            "current_story_id": "US-003",
+            "current_story_role": "engineer",
+            "current_phase": "recovery",
+            "current_recovery_round": 4,
+            "current_started_at": time.time() - 5,
+        },
+        "running",
+    )
+
+    joined = "\n".join(lines)
+    assert "当前: 第 3/8 个任务，第 1/1 轮" in joined
+    assert "子角色: 工程" in joined
+    assert "阶段: 恢复中（第 4 次）" in joined
+
+
+@pytest.mark.asyncio
+async def test_try_fast_path_routes_natural_language_progress_query_to_ralph_status(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    _set_language(workspace, "zh-CN")
+    bus = MessageBus()
+    channel = _FakeChannel()
+    loop = AgentLoop(
+        bus=bus,
+        adapter=_FakeAdapter(workspace),
+        model="glm-5",
+        streaming=False,
+        channel_manager=_FakeChannelManager(channel),
+    )
+
+    chat_id = "ou_test"
+    run_id = "run-progress-query"
+    run_dir = workspace / "ralph" / chat_id / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    loop._ralph_set_current(chat_id, run_id)
+    loop._ralph_save_state(
+        run_dir,
+        {
+            "run_id": run_id,
+            "status": "running",
+            "channel": "feishu",
+            "current_story_index": 3,
+            "current_story_total": 8,
+            "current_pass_index": 1,
+            "current_pass_total": 1,
+            "current_story_title": "REST API 接口实现",
+            "current_story_id": "US-003",
+            "current_story_role": "engineer",
+            "current_phase": "recovery",
+            "current_recovery_round": 2,
+            "current_started_at": time.time() - 3,
+        },
+    )
+
+    handled = await loop._try_fast_path(
+        InboundMessage(
+            channel="feishu",
+            sender_id=chat_id,
+            chat_id=chat_id,
+            content="你现在在做什么？",
+        )
+    )
+
+    assert handled is True
+    assert channel.messages
+    reply = channel.messages[-1].content
+    assert "Ralph 状态: 运行中" in reply
+    assert "子角色: 工程" in reply
+    assert "阶段: 恢复中（第 2 次）" in reply
 
 
 def test_ralph_pick_role_overrides_researcher_when_criteria_require_implementation(tmp_path: Path):
@@ -1127,6 +1392,7 @@ def test_ralph_status_text_is_localized_and_contains_elapsed(tmp_path: Path):
             "current_story_total": 5,
             "current_pass_index": 1,
             "current_pass_total": 1,
+            "current_story_id": "US-001",
             "current_story_title": "项目初始化与基础架构",
             "current_story_role": "engineer",
             "current_started_at": 1,
@@ -1139,7 +1405,41 @@ def test_ralph_status_text_is_localized_and_contains_elapsed(tmp_path: Path):
     assert "Ralph 状态: 运行中" in text
     assert "当前: 第 1/5 个任务，第 1/1 轮" in text
     assert "项目初始化与基础架构" in text
+    assert "[US-001]" in text
     assert "子角色: 工程" in text
+
+
+def test_ralph_normalize_story_synthesizes_missing_acceptance_criteria_and_removes_external_skill_lines(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(workspace), model="glm-5", streaming=False)
+
+    researcher = loop._ralph_normalize_story(
+        {
+            "id": "US-001",
+            "title": "技术调研与架构设计",
+            "description": "输出调研文档",
+            "acceptanceCriteria": [],
+            "role": "researcher",
+        },
+        1,
+    )
+    engineer = loop._ralph_normalize_story(
+        {
+            "id": "US-002",
+            "title": "REST API 实现",
+            "description": "实现 CRUD 接口",
+            "acceptanceCriteria": ["Verify in browser using dev-browser skill"],
+            "role": "engineer",
+        },
+        2,
+    )
+
+    assert researcher["acceptanceCriteria"]
+    assert "docs/architecture-research.md" in "\n".join(researcher["acceptanceCriteria"])
+    assert engineer["acceptanceCriteria"]
+    assert not any("dev-browser skill" in item.lower() for item in engineer["acceptanceCriteria"])
+    assert any("Typecheck passes" == item for item in engineer["acceptanceCriteria"])
 
 
 def test_ralph_prime_current_story_from_prd(tmp_path: Path):
@@ -1153,8 +1453,8 @@ def test_ralph_prime_current_story_from_prd(tmp_path: Path):
         """
         {
           "stories": [
-            {"title": "第一项", "passes": 1, "role": "researcher"},
-            {"title": "第二项", "passes": 2, "role": "qa"}
+            {"id": "US-001", "title": "第一项", "passes": 1, "role": "researcher"},
+            {"id": "US-002", "title": "第二项", "passes": 2, "role": "qa"}
           ]
         }
         """,
@@ -1168,6 +1468,7 @@ def test_ralph_prime_current_story_from_prd(tmp_path: Path):
     assert primed["current_story_total"] == 2
     assert primed["current_pass_index"] == 2
     assert primed["current_pass_total"] == 2
+    assert primed["current_story_id"] == "US-002"
     assert primed["current_story_title"] == "第二项"
     assert primed["current_story_role"] == "qa"
     assert primed["current_started_at"] > 0
@@ -1340,6 +1641,7 @@ async def test_ralph_run_loop_waits_for_late_prd_and_progress_flush(tmp_path: Pa
         streaming=False,
         channel_manager=_FakeChannelManager(channel),
     )
+    loop._get_ralph_stdio_adapter = lambda: asyncio.sleep(0, result=adapter._stdio)  # type: ignore[method-assign]
 
     loop._ralph_set_current(chat_id, run_id)
     loop._ralph_save_state(
@@ -1367,6 +1669,137 @@ async def test_ralph_run_loop_waits_for_late_prd_and_progress_flush(tmp_path: Pa
     assert json.loads(prd_path.read_text(encoding="utf-8"))["stories"][0]["passes"] is True
     sent = [m.content for m in channel.messages]
     assert not any("未真正完成" in content for content in sent)
+
+
+@pytest.mark.asyncio
+async def test_ralph_run_loop_uses_dedicated_stdio_adapter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    bus = MessageBus()
+    channel = _FakeChannel()
+
+    run_id = "run-dedicated"
+    chat_id = "ou_test"
+    run_dir = workspace / "ralph" / chat_id / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    project_dir = workspace / "project" / "demo"
+    project_dir.mkdir(parents=True, exist_ok=True)
+
+    prd_path = run_dir / "prd.json"
+    progress_path = run_dir / "progress.txt"
+    progress_path.write_text("# Ralph Progress\n", encoding="utf-8")
+    prd_path.write_text(
+        json.dumps(
+            {
+                "stories": [
+                    {
+                        "id": "US-001",
+                        "title": "端到端流程技术调研",
+                        "role": "researcher",
+                        "passes": False,
+                    }
+                ]
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    async def _late_flush():
+        await asyncio.sleep(0.1)
+        docs_dir = project_dir / "docs"
+        docs_dir.mkdir(parents=True, exist_ok=True)
+        (docs_dir / "compare.md").write_text("# compare", encoding="utf-8")
+        prd = json.loads(prd_path.read_text(encoding="utf-8"))
+        prd["stories"][0]["passes"] = True
+        prd_path.write_text(json.dumps(prd, ensure_ascii=False, indent=2), encoding="utf-8")
+        with open(progress_path, "a", encoding="utf-8") as f:
+            f.write("\n## 2026-03-15 00:00 - US-001\n- 完成调研\n---\n")
+
+    main_stdio = _FakeRalphStdio(_FakeRalphClient())
+    adapter = _FakeRalphAdapter(workspace, main_stdio)
+    dedicated_client = _FakeRalphClient(_late_flush)
+    dedicated_stdio = _FakeRalphStdio(dedicated_client)
+
+    async def _unexpected_main_stdio():
+        raise AssertionError("main stdio adapter should not be used by Ralph run loop")
+
+    adapter._get_stdio_adapter = _unexpected_main_stdio  # type: ignore[method-assign]
+
+    loop = AgentLoop(
+        bus=bus,
+        adapter=adapter,
+        model="glm-5",
+        streaming=False,
+        channel_manager=_FakeChannelManager(channel),
+    )
+
+    async def _get_ralph_stdio():
+        return dedicated_stdio
+
+    monkeypatch.setattr(loop, "_get_ralph_stdio_adapter", _get_ralph_stdio, raising=False)
+
+    loop._ralph_set_current(chat_id, run_id)
+    loop._ralph_save_state(
+        run_dir,
+        {
+            "run_id": run_id,
+            "status": "approved",
+            "channel": "feishu",
+            "story_index": 0,
+            "pass_index": 0,
+            "project_dir": str(project_dir),
+        },
+    )
+
+    await loop._ralph_run_loop("feishu", chat_id, run_dir)
+
+    assert dedicated_client.create_session_calls
+    state = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+    assert state["status"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_ralph_stop_cancels_dedicated_stdio_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    bus = MessageBus()
+
+    main_client = _FakeRalphClient()
+    main_stdio = _FakeRalphStdio(main_client)
+    adapter = _FakeRalphAdapter(workspace, main_stdio)
+
+    dedicated_client = _FakeRalphClient()
+    dedicated_stdio = _FakeRalphStdio(dedicated_client)
+
+    loop = AgentLoop(bus=bus, adapter=adapter, model="glm-5", streaming=False)
+
+    async def _get_ralph_stdio():
+        return dedicated_stdio
+
+    monkeypatch.setattr(loop, "_get_ralph_stdio_adapter", _get_ralph_stdio, raising=False)
+
+    chat_id = "ou_test"
+    run_id = "run-stop"
+    run_dir = workspace / "ralph" / chat_id / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    loop._ralph_set_current(chat_id, run_id)
+    loop._ralph_save_state(run_dir, {"run_id": run_id, "status": "running"})
+    loop._ralph_active_sessions[chat_id] = "ralph-session-1"
+
+    msg = InboundMessage(
+        channel="feishu",
+        sender_id=chat_id,
+        chat_id=chat_id,
+        content="/ralph stop",
+        metadata={"message_id": "m-stop", "msg_type": "text"},
+    )
+
+    await loop._ralph_stop(msg)
+
+    assert dedicated_client.cancel_calls == ["ralph-session-1"]
+    assert main_client.cancel_calls == []
 
 
 @pytest.mark.asyncio
@@ -1434,6 +1867,7 @@ async def test_ralph_run_loop_retries_incomplete_noop_story_once(tmp_path: Path)
         streaming=False,
         channel_manager=_FakeChannelManager(channel),
     )
+    loop._get_ralph_stdio_adapter = lambda: asyncio.sleep(0, result=adapter._stdio)  # type: ignore[method-assign]
 
     loop._ralph_set_current(chat_id, run_id)
     loop._ralph_save_state(
@@ -1532,6 +1966,7 @@ async def test_ralph_run_loop_treats_completed_progress_entry_as_story_done_with
         streaming=False,
         channel_manager=_FakeChannelManager(channel),
     )
+    loop._get_ralph_stdio_adapter = lambda: asyncio.sleep(0, result=adapter._stdio)  # type: ignore[method-assign]
 
     loop._ralph_set_current(chat_id, run_id)
     loop._ralph_save_state(
@@ -1629,6 +2064,7 @@ async def test_ralph_run_loop_retry_guides_researcher_to_default_docs_path(tmp_p
         streaming=False,
         channel_manager=_FakeChannelManager(channel),
     )
+    loop._get_ralph_stdio_adapter = lambda: asyncio.sleep(0, result=adapter._stdio)  # type: ignore[method-assign]
 
     loop._ralph_set_current(chat_id, run_id)
     loop._ralph_save_state(
@@ -1718,6 +2154,7 @@ async def test_ralph_run_loop_resume_skips_completed_story(tmp_path: Path):
         streaming=False,
         channel_manager=_FakeChannelManager(channel),
     )
+    loop._get_ralph_stdio_adapter = lambda: asyncio.sleep(0, result=adapter._stdio)  # type: ignore[method-assign]
 
     loop._ralph_set_current(chat_id, run_id)
     loop._ralph_save_state(
@@ -1799,6 +2236,7 @@ async def test_ralph_run_loop_empty_response_still_retries_once(tmp_path: Path):
         streaming=False,
         channel_manager=_FakeChannelManager(channel),
     )
+    loop._get_ralph_stdio_adapter = lambda: asyncio.sleep(0, result=adapter._stdio)  # type: ignore[method-assign]
 
     loop._ralph_set_current(chat_id, run_id)
     loop._ralph_save_state(
@@ -1879,6 +2317,7 @@ async def test_ralph_run_loop_retries_when_prompt_raises_timeout(tmp_path: Path)
         streaming=False,
         channel_manager=_FakeChannelManager(channel),
     )
+    loop._get_ralph_stdio_adapter = lambda: asyncio.sleep(0, result=adapter._stdio)  # type: ignore[method-assign]
 
     loop._ralph_set_current(chat_id, run_id)
     loop._ralph_save_state(
@@ -1960,6 +2399,7 @@ async def test_ralph_run_loop_silently_recovers_when_recovery_prompt_times_out(t
         streaming=False,
         channel_manager=_FakeChannelManager(channel),
     )
+    loop._get_ralph_stdio_adapter = lambda: asyncio.sleep(0, result=adapter._stdio)  # type: ignore[method-assign]
 
     loop._ralph_set_current(chat_id, run_id)
     loop._ralph_save_state(
@@ -1981,6 +2421,185 @@ async def test_ralph_run_loop_silently_recovers_when_recovery_prompt_times_out(t
 
     assert state["status"] == "done"
     assert len(fake_client.prompts) == 3
+
+
+@pytest.mark.asyncio
+async def test_ralph_run_loop_retries_when_active_prompt_never_goes_idle(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    bus = MessageBus()
+    channel = _FakeChannel()
+
+    run_id = "run-execution-watchdog"
+    chat_id = "ou_test"
+    run_dir = workspace / "ralph" / chat_id / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    project_dir = workspace / "project" / "demo"
+    project_dir.mkdir(parents=True, exist_ok=True)
+
+    prd_path = run_dir / "prd.json"
+    progress_path = run_dir / "progress.txt"
+    progress_path.write_text("# Ralph Progress\n", encoding="utf-8")
+    prd_path.write_text(
+        json.dumps(
+            {
+                "stories": [
+                    {
+                        "id": "US-001",
+                        "title": "查看任务列表",
+                        "role": "engineer",
+                        "acceptanceCriteria": ["访问首页显示所有任务", "Typecheck passes", "Tests pass"],
+                        "passes": False,
+                    }
+                ]
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    fake_client = _BusyHeartbeatRalphClient()
+    adapter = _FakeRalphAdapter(workspace, _FakeRalphStdio(fake_client))
+    loop = AgentLoop(
+        bus=bus,
+        adapter=adapter,
+        model="glm-5",
+        streaming=False,
+        channel_manager=_FakeChannelManager(channel),
+    )
+    loop._get_ralph_stdio_adapter = lambda: asyncio.sleep(0, result=adapter._stdio)  # type: ignore[method-assign]
+    loop._ralph_prompt_poll_seconds = 0.01
+    loop._ralph_story_idle_watchdog_seconds = 999
+    loop._ralph_story_execution_watchdog_seconds = 0.06
+    loop._ralph_story_settle_timeout_seconds = 0.02
+
+    recovery_calls = {"count": 0}
+
+    async def _fake_retry_incomplete_story(**kwargs):
+        recovery_calls["count"] += 1
+        (project_dir / "app.py").write_text("print('ok')\n", encoding="utf-8")
+        prd = json.loads(prd_path.read_text(encoding="utf-8"))
+        prd["stories"][0]["passes"] = True
+        prd_path.write_text(json.dumps(prd, ensure_ascii=False, indent=2), encoding="utf-8")
+        with open(progress_path, "a", encoding="utf-8") as f:
+            f.write("\n## 2026-03-15 00:00 - US-001\n- 完成查看任务列表\n---\n")
+        return ACPResponse(content="已完成查看任务列表。", error=None)
+
+    loop._ralph_set_current(chat_id, run_id)
+    loop._ralph_save_state(
+        run_dir,
+        {
+            "run_id": run_id,
+            "status": "approved",
+            "channel": "feishu",
+            "story_index": 0,
+            "pass_index": 0,
+            "project_dir": str(project_dir),
+        },
+    )
+
+    loop._ralph_retry_incomplete_story = _fake_retry_incomplete_story  # type: ignore[method-assign]
+
+    await asyncio.wait_for(loop._ralph_run_loop("feishu", chat_id, run_dir), timeout=2)
+
+    state = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+    assert state["status"] == "done"
+    assert recovery_calls["count"] == 1
+    assert fake_client.cancel_calls == ["ralph-session-1"]
+
+
+@pytest.mark.asyncio
+async def test_ralph_run_loop_keeps_recovering_after_three_rounds_until_story_completes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    bus = MessageBus()
+    channel = _FakeChannel()
+
+    run_id = "run-recovery-beyond-three"
+    chat_id = "ou_test"
+    run_dir = workspace / "ralph" / chat_id / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    project_dir = workspace / "project" / "demo"
+    project_dir.mkdir(parents=True, exist_ok=True)
+
+    prd_path = run_dir / "prd.json"
+    progress_path = run_dir / "progress.txt"
+    progress_path.write_text("# Ralph Progress\n", encoding="utf-8")
+    prd_path.write_text(
+        json.dumps(
+            {
+                "stories": [
+                    {
+                        "id": "US-001",
+                        "title": "项目结构设计",
+                        "role": "engineer",
+                        "acceptanceCriteria": ["输出 structure.md"],
+                        "passes": False,
+                    }
+                ]
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    fake_client = _FakeRalphClient(
+        responses=[
+            {"response": ACPResponse(content="先检查项目目录。", error="Tool shell failed")},
+        ]
+    )
+    adapter = _FakeRalphAdapter(workspace, _FakeRalphStdio(fake_client))
+    loop = AgentLoop(
+        bus=bus,
+        adapter=adapter,
+        model="glm-5",
+        streaming=False,
+        channel_manager=_FakeChannelManager(channel),
+    )
+    loop._ralph_prompt_poll_seconds = 0.02
+    loop._ralph_story_settle_timeout_seconds = 0.05
+    loop._ralph_recovery_backoff_seconds = [0, 0, 0]
+    loop._get_ralph_stdio_adapter = lambda: asyncio.sleep(0, result=adapter._stdio)  # type: ignore[method-assign]
+
+    recovery_calls = {"count": 0}
+
+    async def _fake_retry_incomplete_story(**kwargs):
+        recovery_calls["count"] += 1
+        if recovery_calls["count"] < 4:
+            return ACPResponse(content="", error="Prompt timeout (idle)")
+        (project_dir / "structure.md").write_text("# structure\n", encoding="utf-8")
+        prd = json.loads(prd_path.read_text(encoding="utf-8"))
+        prd["stories"][0]["passes"] = True
+        prd_path.write_text(json.dumps(prd, ensure_ascii=False, indent=2), encoding="utf-8")
+        with open(progress_path, "a", encoding="utf-8") as f:
+            f.write("\n## 2026-03-15 00:00 - US-001\n- 完成项目结构设计\n---\n")
+        return ACPResponse(content="已补齐项目结构设计。", error=None)
+
+    monkeypatch.setattr(loop, "_ralph_retry_incomplete_story", _fake_retry_incomplete_story)
+
+    loop._ralph_set_current(chat_id, run_id)
+    loop._ralph_save_state(
+        run_dir,
+        {
+            "run_id": run_id,
+            "status": "approved",
+            "channel": "feishu",
+            "story_index": 0,
+            "pass_index": 0,
+            "project_dir": str(project_dir),
+        },
+    )
+
+    await asyncio.wait_for(loop._ralph_run_loop("feishu", chat_id, run_dir), timeout=2)
+
+    state = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+    contents = [getattr(msg, "content", "") for msg in channel.messages]
+
+    assert recovery_calls["count"] == 4
+    assert state["status"] == "done"
+    assert not any("已暂停" in content or "paused" in content.lower() for content in contents)
     assert not any("内部错误" in content or "paused" in content.lower() for content in contents)
 
 
@@ -2882,6 +3501,7 @@ async def test_ralph_auto_finalizes_engineer_story_when_project_output_exists_an
     loop._ralph_artifact_watchdog_seconds = 0.05
     loop._ralph_story_idle_watchdog_seconds = 0.5
     loop._ralph_story_settle_timeout_seconds = 0.05
+    loop._get_ralph_stdio_adapter = lambda: asyncio.sleep(0, result=adapter._stdio)  # type: ignore[method-assign]
 
     loop._ralph_set_current(chat_id, run_id)
     loop._ralph_save_state(
@@ -2992,6 +3612,7 @@ async def test_ralph_auto_finalizes_hanging_engineer_story_once_artifacts_and_ty
     loop._ralph_artifact_watchdog_seconds = 0.05
     loop._ralph_story_idle_watchdog_seconds = 0.5
     loop._ralph_story_settle_timeout_seconds = 0.05
+    loop._get_ralph_stdio_adapter = lambda: asyncio.sleep(0, result=adapter._stdio)  # type: ignore[method-assign]
 
     loop._ralph_set_current(chat_id, run_id)
     loop._ralph_save_state(
@@ -3098,6 +3719,7 @@ async def test_ralph_resume_auto_finalizes_engineer_story_when_valid_artifacts_a
     loop._ralph_artifact_watchdog_seconds = 0.05
     loop._ralph_story_idle_watchdog_seconds = 0.5
     loop._ralph_story_settle_timeout_seconds = 0.05
+    loop._get_ralph_stdio_adapter = lambda: asyncio.sleep(0, result=adapter._stdio)  # type: ignore[method-assign]
 
     loop._ralph_set_current(chat_id, run_id)
     loop._ralph_save_state(
@@ -3215,6 +3837,7 @@ async def test_ralph_resume_auto_finalizes_when_artifacts_predate_current_starte
     loop._ralph_artifact_watchdog_seconds = 0.05
     loop._ralph_story_idle_watchdog_seconds = 0.5
     loop._ralph_story_settle_timeout_seconds = 0.05
+    loop._get_ralph_stdio_adapter = lambda: asyncio.sleep(0, result=adapter._stdio)  # type: ignore[method-assign]
 
     loop._ralph_set_current(chat_id, run_id)
     loop._ralph_save_state(

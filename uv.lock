@@ -749,7 +749,7 @@ wheels = [
 
 [[package]]
 name = "iflow-bot"
-version = "0.4.2"
+version = "0.4.4"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },

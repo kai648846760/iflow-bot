@@ -50,6 +50,7 @@ STREAMING_CHANNELS = {"telegram", "discord", "slack", "dingtalk", "qq", "feishu"
 # 流式输出缓冲区大小范围（字符数）
 STREAM_BUFFER_MIN = 10
 STREAM_BUFFER_MAX = 25
+STREAM_FIRST_CHUNK_WARN_AFTER = 2.0
 
 
 class AgentLoop:
@@ -87,6 +88,7 @@ class AgentLoop:
         self._stream_tasks: dict[str, asyncio.Task] = {}
         self._ralph_tasks: dict[str, asyncio.Task] = {}
         self._ralph_active_sessions: dict[str, str] = {}
+        self._ralph_stdio_adapter = None
         
         # P3: 每用户并发锁，确保同一用户的消息串行处理，避免会话状态混乱
         self._user_locks: dict[str, asyncio.Lock] = {}
@@ -182,7 +184,7 @@ class AgentLoop:
                 await self._emit_outbound(OutboundMessage(
                     channel=channel,
                     chat_id=chat_id,
-                    content=buffer,
+                    content=chunk,
                     metadata={
                         "_progress": True,
                         "_streaming": True,
@@ -991,6 +993,10 @@ TOOLS.md - Your Tools（你的工具）定义了你可以使用的工具列表�
                 "zh": "⚠️ 本轮未产出可见文本（可能会话上下文过长）。我已自动尝试恢复，如仍失败请发送 /new 开启新会话。",
                 "en": "⚠️ No visible output this turn (context may be too long). I attempted auto-recovery; if it still fails, send /new to start a new session.",
             },
+            "stream_waiting": {
+                "zh": "⏳ 正在处理，请稍候...",
+                "en": "⏳ Processing, please wait...",
+            },
             "process_error": {"zh": "❌ 处理消息时出错: {error}", "en": "❌ Error processing message: {error}"},
             "new_conversation": {"zh": "✨ 已开启新会话，上一轮上下文已清空。", "en": "✨ New conversation started, previous context has been cleared."},
         }
@@ -1654,9 +1660,76 @@ policy: {policy}
         workspace = self.workspace or Path.home() / ".iflow-bot" / "workspace"
         return workspace / candidate
 
+    def _ralph_synthesize_acceptance_criteria(self, story: dict, role: str) -> list[str]:
+        title = str(story.get("title") or "").strip()
+        description = str(story.get("description") or "").strip()
+        combined = f"{title}\n{description}".lower()
+
+        if role == "researcher":
+            return [
+                "输出 `docs/architecture-research.md` 调研文档",
+                "说明 FastAPI + Jinja2 + SQLite 方案的适用性、优缺点与取舍",
+                "给出推荐架构、目录规划与关键设计决策",
+            ]
+        if role == "qa":
+            return [
+                "使用 pytest 编写覆盖核心流程的测试用例",
+                "至少覆盖 Todo 的创建、列表、编辑、删除与完成状态切换",
+                "Tests pass",
+            ]
+        if role == "writer":
+            return [
+                "编写 README.md，说明项目简介与技术栈",
+                "写清依赖安装、启动步骤、测试运行方式与 API 示例",
+                "文档内容与当前实现保持一致",
+            ]
+
+        if any(token in combined for token in ("初始化", "脚手架", "bootstrap", "scaffold", "数据库", "模型")):
+            return [
+                "在目标目录完成 uv 项目初始化并生成 `pyproject.toml`",
+                "创建 `app/`、`tests/`、`app/templates/`、`app/static/` 基础结构",
+                "完成 SQLite 数据模型或数据库初始化逻辑",
+                "Typecheck passes",
+            ]
+        if any(token in combined for token in ("rest api", "api", "接口", "crud", "端点")):
+            return [
+                "实现 Todo 的创建、列表、编辑、删除与完成状态切换接口",
+                "接口输入输出与数据模型保持一致",
+                "Tests pass",
+                "Typecheck passes",
+            ]
+        if any(token in combined for token in ("web ui", "ui", "页面", "模板", "jinja")):
+            return [
+                "实现 Todo 列表、创建、编辑、删除与完成状态切换页面",
+                "页面使用 Jinja2 模板渲染并与后端接口正确联动",
+                "Tests pass",
+                "Typecheck passes",
+            ]
+        return [
+            "完成当前 story 对应功能实现",
+            "交付物写入目标项目目录并可被后续 story 复用",
+            "Typecheck passes",
+        ]
+
     def _ralph_normalize_story(self, story: dict, idx: int) -> dict:
         role = self._ralph_pick_role(story)
-        criteria = [str(item).strip() for item in story.get("acceptanceCriteria", []) if str(item).strip()]
+        criteria = []
+        for item in story.get("acceptanceCriteria", []) or []:
+            text = str(item).strip()
+            if not text:
+                continue
+            lowered = text.lower()
+            if any(
+                needle in lowered
+                for needle in (
+                    "dev-browser skill",
+                    "browser skill",
+                    "using browser skill",
+                    "verify in browser",
+                )
+            ):
+                continue
+            criteria.append(text)
 
         if role in {"researcher", "writer"}:
             criteria = [
@@ -1666,6 +1739,9 @@ policy: {policy}
             ]
         elif "Typecheck passes" not in criteria:
             criteria.append("Typecheck passes")
+
+        if not criteria:
+            criteria = self._ralph_synthesize_acceptance_criteria(story, role)
 
         return {
             "id": story.get("id") or f"US-{idx:03d}",
@@ -1859,8 +1935,10 @@ policy: {policy}
             pass_index = max(0, passes - 1)
 
         title = ""
+        story_id = ""
         role = ""
         if isinstance(story, dict):
+            story_id = str(story.get("id") or "").strip()
             title = str(story.get("title") or story.get("name") or "").strip()
             role = self._ralph_pick_role(story)
 
@@ -1871,6 +1949,7 @@ policy: {policy}
         state["current_story_total"] = len(stories)
         state["current_pass_index"] = pass_index + 1
         state["current_pass_total"] = passes
+        state["current_story_id"] = story_id
         state["current_story_title"] = title
         state["current_story_role"] = role
         if (
@@ -2075,6 +2154,35 @@ policy: {policy}
             ), prefer_direct=True)
             if idx < len(chunks) - 1:
                 await asyncio.sleep(0.2)
+
+    async def _get_ralph_stdio_adapter(self):
+        adapter = getattr(self, "_ralph_stdio_adapter", None)
+        if adapter is not None:
+            return adapter
+
+        main_adapter = self.adapter
+        if getattr(main_adapter, "mode", None) != "stdio":
+            return await main_adapter._get_stdio_adapter()
+
+        from iflow_bot.engine.stdio_acp import StdioACPAdapter
+
+        adapter = StdioACPAdapter(
+            iflow_path=getattr(main_adapter, "iflow_path", "iflow"),
+            workspace=getattr(main_adapter, "workspace", self.workspace),
+            timeout=getattr(main_adapter, "timeout", None),
+            default_model=getattr(main_adapter, "default_model", self.model),
+            thinking=getattr(main_adapter, "thinking", False),
+            active_compress_trigger_tokens=getattr(main_adapter, "compression_trigger_tokens", 0),
+            mcp_proxy_port=getattr(main_adapter, "mcp_proxy_port", 8888),
+            mcp_servers_auto_discover=getattr(main_adapter, "mcp_servers_auto_discover", True),
+            mcp_servers_max=getattr(main_adapter, "mcp_servers_max", 10),
+            mcp_servers_allowlist=getattr(main_adapter, "mcp_servers_allowlist", None),
+            mcp_servers_blocklist=getattr(main_adapter, "mcp_servers_blocklist", None),
+        )
+        await adapter.connect()
+        self._ralph_stdio_adapter = adapter
+        logger.info("Ralph stdio adapter connected")
+        return adapter
 
     async def _ralph_generate_prd_md(self, prompt: str, qa_block: str, run_dir: Path) -> str:
         try:
@@ -2918,24 +3026,20 @@ policy: {policy}
         task_prompt: str = "",
     ) -> str:
         role = self._ralph_pick_role(story)
-        story_id = str(story.get("id") or "US-001").strip().lower().replace("_", "-")
         criteria = [str(item).strip() for item in story.get("acceptanceCriteria", []) if str(item).strip()]
-        artifact_paths: list[str] = []
-        for item in criteria:
-            for match in re.findall(r"`([^`]+)`", item):
-                artifact_paths.append(match)
-            for match in re.findall(r"\b(?:docs|src|templates|static|tests)/[A-Za-z0-9_./-]+\b", item):
-                artifact_paths.append(match)
-        fallback_doc_path = project_dir / "docs" / f"{story_id}-researcher-notes.md"
-        if role in {"researcher", "writer"} and not artifact_paths:
+        explicit_artifact_paths = self._ralph_extract_explicit_artifact_paths(story, project_dir)
+        fallback_doc_path = self._ralph_default_artifact_path(story, project_dir)
+        artifact_paths = [str(path) for path in explicit_artifact_paths]
+        if role in {"researcher", "writer"} and not artifact_paths and fallback_doc_path is not None:
             artifact_paths.append(str(fallback_doc_path))
         artifact_paths = list(dict.fromkeys(artifact_paths))
         artifact_block = "\n".join(f"- {path}" for path in artifact_paths) if artifact_paths else "- Follow the acceptance criteria exactly."
         extra_rules = ""
         if role in {"researcher", "writer"}:
+            target_path = artifact_paths[0] if artifact_paths else str(fallback_doc_path or (project_dir / "docs"))
             extra_rules = (
                 f"\nFor this {role} story, Create the documentation file even if the project directory is empty.\n"
-                f"Write the deliverable into: {fallback_doc_path}\n"
+                f"Write the deliverable into: {target_path}\n"
                 "Do not stop at checking directories or reading files.\n"
             )
         context_block = ""
@@ -3025,6 +3129,7 @@ policy: {policy}
         command_tokens = [token for token in re.findall(r"[A-Za-z0-9_]+", f"{title} {command_phrase}".lower()) if token]
         criteria_text = "\n".join(str(item) for item in (story.get("acceptanceCriteria") or []))
         combined_text = f"{title}\n{criteria_text}".lower()
+        lowered_output = latest_output.lower()
         pyproject_path = project_dir / "pyproject.toml"
         pyproject_text = ""
         with contextlib.suppress(Exception):
@@ -3089,13 +3194,32 @@ policy: {policy}
                 mypy_fix_hint = "Fix the reported type error in the flagged file before rerunning the full verification."
 
         missing_modules = {match.lower() for match in re.findall(r"No module named ([A-Za-z0-9_.-]+)", latest_output, re.IGNORECASE)}
+        if "starlette.testclient module requires the httpx package" in lowered_output:
+            missing_modules.add("httpx")
         dependency_hints: list[str] = []
         if "pytest" in missing_modules or "mypy" in missing_modules:
             dependency_hints.append(
                 "Install the missing dev tools in the project environment, then run `uv sync --extra dev` before rerunning verification."
             )
+        declared_lower = pyproject_text.lower()
+        is_test_context = (
+            self._ralph_story_requires_tests(story)
+            or "testclient" in lowered_output
+            or "tests/" in lowered_output
+            or "test_" in lowered_output
+        )
+        for module in sorted(missing_modules):
+            if module in {"pytest", "mypy"} or module in declared_lower:
+                continue
+            if is_test_context or module == "httpx":
+                dependency_hints.append(
+                    f"Add the missing dev dependency `{module}` (for example `uv add --dev {module}`), sync the environment, then rerun verification."
+                )
+            else:
+                dependency_hints.append(
+                    f"Add the missing runtime dependency `{module}` (for example `uv add {module}`), sync the environment, then rerun verification."
+                )
         if is_scaffold_story:
-            declared_lower = pyproject_text.lower()
             missing_runtime: list[str] = []
             for package in ("fastapi", "jinja2"):
                 if package not in declared_lower:
@@ -3205,26 +3329,61 @@ policy: {policy}
         workspace = Path(common)
         return workspace if workspace.is_dir() else run_dir
 
-    def _ralph_expected_artifact_paths(self, story: dict, project_dir: Path) -> list[Path]:
+    def _ralph_default_artifact_path(self, story: dict, project_dir: Path) -> Path | None:
         role = self._ralph_pick_role(story)
         story_id = str(story.get("id") or "US-001").strip().lower().replace("_", "-")
-        criteria = [str(item).strip() for item in story.get("acceptanceCriteria", []) if str(item).strip()]
+        if role == "researcher":
+            return project_dir / "docs" / f"{story_id}-researcher-notes.md"
+        if role == "writer":
+            return project_dir / "docs" / f"{story_id}-writer-notes.md"
+        return None
+
+    def _ralph_extract_explicit_artifact_paths(self, story: dict, project_dir: Path) -> list[Path]:
+        text_blocks = [
+            str(story.get("title") or "").strip(),
+            str(story.get("description") or "").strip(),
+            *[str(item).strip() for item in story.get("acceptanceCriteria", []) if str(item).strip()],
+        ]
         artifact_paths: list[Path] = []
-        for item in criteria:
+
+        def add_path(raw: str) -> None:
+            candidate = Path(raw).expanduser()
+            if not candidate.is_absolute():
+                candidate = project_dir / raw
+            artifact_paths.append(candidate)
+
+        for item in text_blocks:
             for match in re.findall(r"`([^`]+)`", item):
-                artifact_paths.append(project_dir / match if not Path(match).is_absolute() else Path(match))
+                add_path(match)
             for match in re.findall(r"\b(?:app|data|docs|src|templates|static|tests)/[A-Za-z0-9_./-]+\b", item):
-                artifact_paths.append(project_dir / match if not Path(match).is_absolute() else Path(match))
+                add_path(match)
             for match in re.findall(r"(?<![A-Za-z0-9_.-])((?:/|~)[^\s，。,;；:：]+)", item):
                 if "、" in match:
                     continue
-                candidate = Path(match).expanduser()
-                if candidate.suffix:
-                    artifact_paths.append(candidate)
-                else:
-                    artifact_paths.append(candidate)
-        if role in {"researcher", "writer"} and not artifact_paths:
-            artifact_paths.append(project_dir / "docs" / f"{story_id}-researcher-notes.md")
+                add_path(match)
+            for match in re.findall(
+                r"(?<![A-Za-z0-9_/.-])((?:\.[A-Za-z0-9_-]+|[A-Za-z0-9_-]*[A-Za-z][A-Za-z0-9_.-]*)\.[A-Za-z0-9]{1,10})(?![A-Za-z0-9_/.-])",
+                item,
+            ):
+                add_path(match)
+
+        deduped: list[Path] = []
+        seen: set[str] = set()
+        for path in artifact_paths:
+            key = str(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(path)
+        return deduped
+
+    def _ralph_expected_artifact_paths(self, story: dict, project_dir: Path) -> list[Path]:
+        role = self._ralph_pick_role(story)
+        artifact_paths = self._ralph_extract_explicit_artifact_paths(story, project_dir)
+        if not artifact_paths:
+            fallback_path = self._ralph_default_artifact_path(story, project_dir)
+            if fallback_path is not None:
+                artifact_paths.append(fallback_path)
         if role not in {"researcher", "writer"} and not artifact_paths:
             artifact_paths.append(project_dir)
         deduped: list[Path] = []
@@ -3418,6 +3577,12 @@ policy: {policy}
             float(getattr(self, "_ralph_recovery_idle_watchdog_seconds", 60.0)),
             latest_output=latest_output,
         )
+        recovery_execution_watchdog = self._ralph_recovery_execution_watchdog_seconds_for_attempt(
+            story,
+            float(getattr(self, "_ralph_recovery_execution_watchdog_seconds", 0.0))
+            or float(timeout_budgets[0]),
+            latest_output=latest_output,
+        )
         configured_poll_interval = float(getattr(self, "_ralph_prompt_poll_seconds", 2.0))
         poll_interval = configured_poll_interval
         if recovery_idle_watchdog > 0:
@@ -3441,6 +3606,7 @@ policy: {policy}
             try:
                 last_activity = asyncio.get_running_loop().time()
                 activity_clock = {"last": last_activity}
+                attempt_started = last_activity
                 activity_snapshot = self._ralph_snapshot_artifacts(activity_paths)
                 artifact_snapshot = self._ralph_snapshot_artifacts(artifact_paths)
                 artifact_watch_started: float | None = None
@@ -3521,8 +3687,33 @@ policy: {policy}
                         observed_artifacts = candidate_artifacts
                     artifact_snapshot = self._ralph_snapshot_artifacts(artifact_paths)
 
+                    if recovery_execution_watchdog > 0 and now - attempt_started >= recovery_execution_watchdog:
+                        prompt_cancel_reason = (
+                            f"Prompt execution watchdog exceeded ({int(recovery_execution_watchdog)}s)"
+                        )
+                        logger.warning(
+                            "Ralph recovery execution watchdog exceeded for {} after {}s (attempt {}/{})",
+                            chat_id,
+                            int(recovery_execution_watchdog),
+                            attempt,
+                            len(timeout_budgets),
+                        )
+                        with contextlib.suppress(Exception):
+                            await stdio._client.cancel(session_id)
+                        prompt_task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await prompt_task
+                        break
+
                     if recovery_idle_watchdog > 0 and now - last_activity >= recovery_idle_watchdog:
                         prompt_cancel_reason = f"Prompt timeout (idle watchdog after {int(recovery_idle_watchdog)}s)"
+                        logger.warning(
+                            "Ralph recovery idle watchdog exceeded for {} after {}s (attempt {}/{})",
+                            chat_id,
+                            int(recovery_idle_watchdog),
+                            attempt,
+                            len(timeout_budgets),
+                        )
                         with contextlib.suppress(Exception):
                             await stdio._client.cancel(session_id)
                         prompt_task.cancel()
@@ -3584,6 +3775,43 @@ policy: {policy}
         latest_output: str = "",
     ) -> float:
         base = self._ralph_idle_watchdog_seconds(story, base_seconds)
+        role = self._ralph_pick_role(story or {})
+        lowered = (latest_output or "").lower()
+        if role in {"engineer", "qa"} and any(
+            token in lowered
+            for token in (
+                "supervisor verification evidence",
+                "no module named",
+                "error:",
+                "traceback",
+                "tests failed",
+                "typecheck",
+            )
+        ):
+            return max(base, 180.0)
+        return base
+
+    def _ralph_execution_watchdog_seconds(
+        self,
+        story: Optional[dict],
+        base_seconds: float,
+    ) -> float:
+        base = float(base_seconds or 0)
+        if base > 0:
+            return base
+        if base <= 0:
+            base = float(getattr(self.adapter, "timeout", 0) or 600)
+        role = self._ralph_pick_role(story or {})
+        cap = 300.0 if role in {"researcher", "writer"} else 90.0
+        return max(30.0, min(base, cap))
+
+    def _ralph_recovery_execution_watchdog_seconds_for_attempt(
+        self,
+        story: Optional[dict],
+        base_seconds: float,
+        latest_output: str = "",
+    ) -> float:
+        base = self._ralph_execution_watchdog_seconds(story, base_seconds)
         role = self._ralph_pick_role(story or {})
         lowered = (latest_output or "").lower()
         if role in {"engineer", "qa"} and any(
@@ -4017,7 +4245,7 @@ policy: {policy}
         session_id = self._ralph_active_sessions.pop(chat_id, None)
         if session_id:
             try:
-                stdio = await self.adapter._get_stdio_adapter()
+                stdio = await self._get_ralph_stdio_adapter()
                 if stdio._client:
                     await stdio._client.cancel(session_id)
             except Exception:
@@ -4060,41 +4288,7 @@ policy: {policy}
             lines = [line for line in cleaned.strip().splitlines() if line.strip()] if cleaned else []
             tail = "\n".join(lines[-6:])
 
-        current_line = ""
-        current_story = state.get("current_story_index")
-        current_total = state.get("current_story_total")
-        current_pass = state.get("current_pass_index")
-        current_pass_total = state.get("current_pass_total")
-        current_title = state.get("current_story_title")
-        current_role = state.get("current_story_role")
-        started_at = state.get("current_started_at")
-        if raw_status == "running" and current_story and current_total and current_pass and current_pass_total:
-            elapsed = ""
-            if started_at:
-                try:
-                    elapsed = f"({int(time.time() - float(started_at))}s)" if self._is_english(self._load_language_setting()) else f"（{int(time.time() - float(started_at))}s）"
-                except Exception:
-                    elapsed = ""
-            if self._is_english(self._load_language_setting()):
-                current_line = (
-                    f"Current: Story {current_story}/{current_total} "
-                    f"Pass {current_pass}/{current_pass_total}{elapsed}"
-                )
-            else:
-                current_line = (
-                    f"当前: 第 {current_story}/{current_total} 个任务，"
-                    f"第 {current_pass}/{current_pass_total} 轮{elapsed}"
-                )
-            if current_title:
-                current_line += f": {current_title}" if self._is_english(self._load_language_setting()) else f"：{current_title}"
-        role_line = ""
-        if raw_status == "running" and current_role:
-            formatted_role = self._format_ralph_role(str(current_role))
-            role_line = (
-                f"Subagent role: {formatted_role}"
-                if self._is_english(self._load_language_setting())
-                else f"子角色: {formatted_role}"
-            )
+        current_lines = self._ralph_status_current_lines(state, raw_status)
 
         await self._send_command_reply(
             msg,
@@ -4103,8 +4297,7 @@ policy: {policy}
                 for part in [
                     f"Ralph status: {status}" if self._is_english(self._load_language_setting()) else f"Ralph 状态: {status}",
                     f"run_id: {run_id}",
-                    current_line,
-                    role_line,
+                    *current_lines,
                     "",
                     tail,
                 ]
@@ -4251,7 +4444,7 @@ policy: {policy}
         if not progress_path.exists():
             progress_path.write_text("# Ralph Progress\n", encoding="utf-8")
 
-        stdio = await self.adapter._get_stdio_adapter()
+        stdio = await self._get_ralph_stdio_adapter()
         await stdio.connect()
         if not stdio._client:
             await self.bus.publish_outbound(OutboundMessage(
@@ -4281,8 +4474,10 @@ policy: {policy}
                     return
 
                 title = ""
+                story_id = ""
                 role = ""
                 if isinstance(story, dict):
+                    story_id = str(story.get("id") or "").strip()
                     title = str(story.get("title") or story.get("name") or "").strip()
                     role = self._ralph_pick_role(story)
                 previous_story_index = state.get("current_story_index")
@@ -4297,12 +4492,15 @@ policy: {policy}
                 state["current_story_total"] = len(stories)
                 state["current_pass_index"] = pass_index + 1
                 state["current_pass_total"] = passes
+                state["current_story_id"] = story_id
                 state["current_story_title"] = title
                 state["current_story_role"] = role
                 if resumed_same_story_pass:
                     state["current_started_at"] = previous_started_at
                 else:
                     state["current_started_at"] = time.time()
+                state["current_phase"] = "executing"
+                state.pop("current_recovery_round", None)
                 self._ralph_save_state(run_dir, state)
                 lang = self._load_language_setting()
                 policy = self._format_language_policy(lang)
@@ -4336,9 +4534,14 @@ policy: {policy}
                     current_story,
                     float(getattr(self, "_ralph_story_idle_watchdog_seconds", 60.0)),
                 )
+                execution_watchdog = self._ralph_execution_watchdog_seconds(
+                    current_story,
+                    float(getattr(self, "_ralph_story_execution_watchdog_seconds", 0.0)),
+                )
                 settle_timeout = float(getattr(self, "_ralph_story_settle_timeout_seconds", 3.0))
                 last_activity = asyncio.get_running_loop().time()
                 activity_clock = {"last": last_activity}
+                attempt_started = last_activity
                 resume_anchor_mtime = None
                 started_at = state.get("current_started_at")
                 if started_at is not None:
@@ -4351,7 +4554,11 @@ policy: {policy}
                 )
                 if not existing_artifacts and resumed_same_story_pass:
                     existing_artifacts = self._ralph_materialized_artifacts(artifact_paths)
-                if not existing_artifacts and resumed_same_story_pass:
+                if (
+                    not existing_artifacts
+                    and resumed_same_story_pass
+                    and self._ralph_pick_role(current_story) not in {"researcher", "writer"}
+                ):
                     existing_artifacts = self._ralph_materialized_artifacts([project_dir])
                 if existing_artifacts:
                     should_autofinalize = False
@@ -4474,8 +4681,32 @@ policy: {policy}
                             artifact_watch_started = now
                             observed_artifacts = candidate_artifacts
                         artifact_snapshot = self._ralph_snapshot_artifacts(artifact_paths)
+                        if not auto_finalized and execution_watchdog > 0 and now - attempt_started >= execution_watchdog:
+                            prompt_cancel_reason = (
+                                f"Prompt execution watchdog exceeded ({int(execution_watchdog)}s)"
+                            )
+                            logger.warning(
+                                "Ralph story execution watchdog exceeded for {}:{} after {}s; cancelling current prompt",
+                                channel,
+                                chat_id,
+                                int(execution_watchdog),
+                            )
+                            try:
+                                await stdio._client.cancel(session_id)
+                            except Exception:
+                                pass
+                            prompt_task.cancel()
+                            with contextlib.suppress(asyncio.CancelledError):
+                                await prompt_task
+                            break
                         if not auto_finalized and idle_watchdog > 0 and now - last_activity >= idle_watchdog:
                             prompt_cancel_reason = f"Prompt idle watchdog exceeded ({int(idle_watchdog)}s)"
+                            logger.warning(
+                                "Ralph story idle watchdog exceeded for {}:{} after {}s; cancelling current prompt",
+                                channel,
+                                chat_id,
+                                int(idle_watchdog),
+                            )
                             try:
                                 await stdio._client.cancel(session_id)
                             except Exception:
@@ -4563,7 +4794,17 @@ policy: {policy}
                     current_story_after = stories_after[story_index] if story_index < len(stories_after) else story
                 recovery_round = 0
                 max_recovery_rounds = 3
-                while not self._ralph_story_completed(current_story_after) and recovery_round < max_recovery_rounds:
+                backoff_schedule = list(getattr(self, "_ralph_recovery_backoff_seconds", [5, 15, 30, 60]))
+                backoff_index = 0
+                while not self._ralph_story_completed(current_story_after):
+                    latest_state = self._ralph_get_effective_state(chat_id, run_dir)
+                    if latest_state.get("status") in {"stopped", "failed"}:
+                        return
+                    state.update(latest_state)
+                    state["current_phase"] = "recovery"
+                    state["current_recovery_round"] = recovery_round + 1
+                    state["updated_at"] = asyncio.get_running_loop().time()
+                    self._ralph_save_state(run_dir, state)
                     latest_output = self._ralph_strip_markers(delta)
                     if not latest_output:
                         latest_output = self._ralph_strip_markers(progress_after)
@@ -4583,7 +4824,12 @@ policy: {policy}
                     autofinalize_artifacts = changed_artifacts
                     if not autofinalize_artifacts and resumed_same_story_pass:
                         autofinalize_artifacts = self._ralph_materialized_artifacts(artifact_paths)
-                    if not autofinalize_artifacts and resumed_same_story_pass:
+                    if (
+                        not autofinalize_artifacts
+                        and resumed_same_story_pass
+                        and self._ralph_pick_role(current_story_after if isinstance(current_story_after, dict) else story)
+                        not in {"researcher", "writer"}
+                    ):
                         autofinalize_artifacts = self._ralph_materialized_artifacts([project_dir])
                     if self._ralph_can_supervisor_autofinalize(
                         current_story_after if isinstance(current_story_after, dict) else story,
@@ -4678,17 +4924,35 @@ policy: {policy}
                     stories_after = prd_after.get("stories") or prd_after.get("userStories") or []
                     current_story_after = stories_after[story_index] if story_index < len(stories_after) else story
                     recovery_round += 1
-                if not self._ralph_story_completed(current_story_after):
-                    state["status"] = "stopped"
-                    state["updated_at"] = asyncio.get_running_loop().time()
-                    self._ralph_save_state(run_dir, state)
-                    self._ralph_active_sessions.pop(chat_id, None)
-                    self._ralph_tasks.pop(chat_id, None)
-                    await self._ralph_send_update(channel, chat_id, self._msg("ralph_story_incomplete_paused"))
-                    return
+                    if self._ralph_story_completed(current_story_after):
+                        break
+                    if max_recovery_rounds > 0 and recovery_round % max_recovery_rounds == 0:
+                        delay = 0.0
+                        if backoff_schedule:
+                            delay = float(backoff_schedule[min(backoff_index, len(backoff_schedule) - 1)])
+                        backoff_index += 1
+                        if delay > 0:
+                            state["current_phase"] = "recovery_wait"
+                            state["current_recovery_round"] = recovery_round
+                            state["updated_at"] = asyncio.get_running_loop().time()
+                            self._ralph_save_state(run_dir, state)
+                            logger.warning(
+                                "Ralph story still incomplete after {} recovery rounds for {}:{}; backing off {}s before retry",
+                                recovery_round,
+                                channel,
+                                chat_id,
+                                delay,
+                            )
+                            await asyncio.sleep(delay)
+                            latest_state = self._ralph_get_effective_state(chat_id, run_dir)
+                            if latest_state.get("status") in {"stopped", "failed"}:
+                                return
+                            state.update(latest_state)
 
                 state["story_index"] = story_index
                 state["pass_index"] = pass_index + 1
+                state["current_phase"] = "executing"
+                state.pop("current_recovery_round", None)
                 state["updated_at"] = asyncio.get_running_loop().time()
                 self._ralph_save_state(run_dir, state)
 
@@ -4708,6 +4972,8 @@ policy: {policy}
 
                 if "[RALPH_DONE]" in progress_after:
                     state["status"] = "done"
+                    state["current_phase"] = "done"
+                    state.pop("current_recovery_round", None)
                     state["updated_at"] = asyncio.get_running_loop().time()
                     self._ralph_save_state(run_dir, state)
                     self._ralph_active_sessions.pop(chat_id, None)
@@ -4753,6 +5019,8 @@ policy: {policy}
             )
 
         state["status"] = "done"
+        state["current_phase"] = "done"
+        state.pop("current_recovery_round", None)
         state["updated_at"] = asyncio.get_running_loop().time()
         self._ralph_save_state(run_dir, state)
         self._ralph_active_sessions.pop(chat_id, None)
@@ -4820,6 +5088,68 @@ policy: {policy}
         task = self._ralph_tasks.get(chat_id)
         return bool(task and not task.done())
 
+    def _ralph_is_running_state(self, chat_id: str) -> bool:
+        run_id = self._ralph_get_current(chat_id)
+        if not run_id:
+            return False
+        run_dir = self._ralph_run_dir(chat_id, run_id)
+        state = self._ralph_get_effective_state(chat_id, run_dir)
+        return str(state.get("status") or "").strip().lower() == "running"
+
+    def _ralph_status_current_lines(self, state: dict, raw_status: str) -> list[str]:
+        if raw_status != "running":
+            return []
+
+        is_en = self._is_english(self._load_language_setting())
+        current_story = state.get("current_story_index")
+        current_total = state.get("current_story_total")
+        current_pass = state.get("current_pass_index")
+        current_pass_total = state.get("current_pass_total")
+        current_title = state.get("current_story_title")
+        current_id = state.get("current_story_id")
+        current_role = state.get("current_story_role")
+        current_phase = state.get("current_phase")
+        current_recovery_round = state.get("current_recovery_round")
+        started_at = state.get("current_started_at")
+        if not (current_story and current_total and current_pass and current_pass_total):
+            return []
+
+        elapsed = ""
+        if started_at:
+            with contextlib.suppress(Exception):
+                elapsed_seconds = int(time.time() - float(started_at))
+                elapsed = f" ({elapsed_seconds}s)" if is_en else f"（{elapsed_seconds}s）"
+
+        current_line = (
+            f"Current: Story {current_story}/{current_total} Pass {current_pass}/{current_pass_total}{elapsed}"
+            if is_en
+            else f"当前: 第 {current_story}/{current_total} 个任务，第 {current_pass}/{current_pass_total} 轮{elapsed}"
+        )
+        if current_title:
+            current_line += f": {current_title}" if is_en else f"：{current_title}"
+        if current_id:
+            current_line += f" [{current_id}]" if is_en else f" [{current_id}]"
+
+        lines = [current_line]
+        if current_role:
+            formatted_role = self._format_ralph_role(str(current_role))
+            lines.append(
+                f"Subagent role: {formatted_role}"
+                if is_en
+                else f"子角色: {formatted_role}"
+            )
+        if current_phase:
+            formatted_phase = self._format_ralph_phase(
+                str(current_phase),
+                int(current_recovery_round) if current_recovery_round else None,
+            )
+            lines.append(
+                f"Phase: {formatted_phase}"
+                if is_en
+                else f"阶段: {formatted_phase}"
+            )
+        return lines
+
     def _ralph_current_status_text(self, chat_id: str) -> str:
         run_id = self._ralph_get_current(chat_id)
         if not run_id:
@@ -4832,36 +5162,7 @@ policy: {policy}
             f"Ralph status: {status}" if self._is_english(self._load_language_setting()) else f"Ralph 状态: {status}",
             f"run_id: {run_id}",
         ]
-        current_story = state.get("current_story_index")
-        current_total = state.get("current_story_total")
-        current_pass = state.get("current_pass_index")
-        current_pass_total = state.get("current_pass_total")
-        current_title = state.get("current_story_title")
-        current_role = state.get("current_story_role")
-        started_at = state.get("current_started_at")
-        if raw_status == "running" and current_story and current_total and current_pass and current_pass_total:
-            elapsed = ""
-            if started_at:
-                try:
-                    elapsed_seconds = int(time.time() - float(started_at))
-                    elapsed = f" ({elapsed_seconds}s)" if self._is_english(self._load_language_setting()) else f"（{elapsed_seconds}s）"
-                except Exception:
-                    elapsed = ""
-            line = (
-                f"Current: Story {current_story}/{current_total} Pass {current_pass}/{current_pass_total}{elapsed}"
-                if self._is_english(self._load_language_setting())
-                else f"当前: 第 {current_story}/{current_total} 个任务，第 {current_pass}/{current_pass_total} 轮{elapsed}"
-            )
-            if current_title:
-                line += f": {current_title}" if self._is_english(self._load_language_setting()) else f"：{current_title}"
-            parts.append(line)
-        if raw_status == "running" and current_role:
-            formatted_role = self._format_ralph_role(str(current_role))
-            parts.append(
-                f"Subagent role: {formatted_role}"
-                if self._is_english(self._load_language_setting())
-                else f"子角色: {formatted_role}"
-            )
+        parts.extend(self._ralph_status_current_lines(state, raw_status))
         return "\n".join(parts)
 
     def _format_ralph_status(self, status: str) -> str:
@@ -4904,6 +5205,48 @@ policy: {policy}
             "writer": "文档",
         }
         return mapping.get(normalized, normalized or "未知")
+
+    def _format_ralph_phase(self, phase: str, recovery_round: int | None = None) -> str:
+        normalized = (phase or "").strip().lower()
+        is_en = self._is_english(self._load_language_setting())
+        if is_en:
+            mapping = {
+                "executing": "executing",
+                "recovery": "recovering",
+                "recovery_wait": "recovery backoff",
+            }
+            label = mapping.get(normalized, normalized or "unknown")
+            if normalized.startswith("recovery") and recovery_round:
+                return f"{label} (attempt {recovery_round})"
+            return label
+        mapping = {
+            "executing": "执行中",
+            "recovery": "恢复中",
+            "recovery_wait": "恢复等待中",
+        }
+        label = mapping.get(normalized, phase or "未知")
+        if normalized.startswith("recovery") and recovery_round:
+            return f"{label}（第 {recovery_round} 次）"
+        return label
+
+    def _ralph_looks_like_status_query(self, content: str) -> bool:
+        text = (content or "").strip().lower()
+        if not text:
+            return False
+        patterns = (
+            "你现在在做什么",
+            "你在做什么",
+            "当前进度",
+            "现在进度",
+            "在干嘛",
+            "在做啥",
+            "what are you doing",
+            "what are you working on",
+            "current progress",
+            "current status",
+            "what's the progress",
+        )
+        return any(pattern in text for pattern in patterns)
 
     async def _try_fast_path(self, msg: InboundMessage) -> bool:
         cmd, args = self._peek_command(msg.content)
@@ -4976,6 +5319,10 @@ policy: {policy}
 
         if cmd == "/ralph" and args and args[0].lower() not in {"status", "stop", "resume", "approve", "answer"} and active_ralph:
             await self._send_command_reply(msg, self._msg("ralph_running_stop"))
+            return True
+
+        if (active_ralph or self._ralph_is_running_state(msg.chat_id)) and not cmd and self._ralph_looks_like_status_query(msg.content):
+            await self._send_command_reply(msg, self._ralph_current_status_text(msg.chat_id))
             return True
 
         return False
@@ -5116,6 +5463,9 @@ policy: {policy}
         # 未发送的字符计数和当前阈值
         unflushed_count = 0
         current_threshold = random.randint(STREAM_BUFFER_MIN, STREAM_BUFFER_MAX)
+        last_stream_published_content = ""
+        first_chunk_seen = False
+        placeholder_task: asyncio.Task | None = None
         
         # 钉钉使用直接调用方式（AI Card）
         dingtalk_channel = None
@@ -5137,9 +5487,11 @@ policy: {policy}
 
         async def on_chunk(channel: str, chat_id: str, chunk_text: str):
             """处理流式消息块。"""
-            nonlocal unflushed_count, current_threshold, qq_segment_buffer, qq_line_buffer, qq_newline_count, qq_in_code_block
+            nonlocal unflushed_count, current_threshold, qq_segment_buffer, qq_line_buffer
+            nonlocal qq_newline_count, qq_in_code_block, last_stream_published_content, first_chunk_seen
 
             key = f"{channel}:{chat_id}"
+            first_chunk_seen = True
 
             # 更新累积缓冲区（所有渠道，用于记录完整内容与日志）
             self._stream_buffers[key] = self._stream_buffers.get(key, "") + chunk_text
@@ -5199,18 +5551,39 @@ policy: {policy}
                     await dingtalk_channel.handle_streaming_chunk(chat_id, self._stream_buffers[key], is_final=False)
                 else:
                     # 其他渠道：通过消息总线
+                    content = self._stream_buffers[key]
                     await self.bus.publish_outbound(OutboundMessage(
                         channel=channel,
                         chat_id=chat_id,
-                        content=self._stream_buffers[key],
+                        content=content,
                         metadata={
                             "_progress": True,
                             "_streaming": True,
                             **self._build_reply_metadata(msg),
                         },
-                    ))
+                ))
+                    last_stream_published_content = content
+
+        async def emit_waiting_placeholder():
+            if msg.channel in {"qq", "dingtalk"}:
+                return
+            await asyncio.sleep(STREAM_FIRST_CHUNK_WARN_AFTER)
+            if first_chunk_seen or session_key not in self._stream_buffers:
+                return
+            await self.bus.publish_outbound(OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=self._msg("stream_waiting"),
+                metadata={
+                    "_progress": True,
+                    "_streaming": True,
+                    "_streaming_placeholder": True,
+                    **self._build_reply_metadata(msg),
+                },
+            ))
         
         try:
+            placeholder_task = asyncio.create_task(emit_waiting_placeholder())
             # 使用流式 chat
             response = await self.adapter.chat_stream(
                 message=message_content,
@@ -5219,6 +5592,10 @@ policy: {policy}
                 model=self.model,
                 on_chunk=on_chunk,
             )
+            if placeholder_task:
+                placeholder_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await placeholder_task
             
             # 清理缓冲区并发送最终内容
             final_content = self._stream_buffers.pop(session_key, "")
@@ -5300,17 +5677,19 @@ policy: {policy}
                         ))
                 elif msg.channel != "qq":
                     # 其他渠道（非 QQ、非钉钉）：通过消息总线
-                    await self.bus.publish_outbound(OutboundMessage(
-                        channel=msg.channel,
-                        chat_id=msg.chat_id,
-                        content=effective_content,
-                        media=media_files,
-                        metadata={
-                            "_progress": True,
-                            "_streaming": True,
-                            **self._build_reply_metadata(msg),
-                        },
-                    ))
+                    should_emit_final_content = bool(media_files) or effective_content != last_stream_published_content
+                    if should_emit_final_content:
+                        await self.bus.publish_outbound(OutboundMessage(
+                            channel=msg.channel,
+                            chat_id=msg.chat_id,
+                            content=effective_content,
+                            media=media_files,
+                            metadata={
+                                "_progress": True,
+                                "_streaming": True,
+                                **self._build_reply_metadata(msg),
+                            },
+                        ))
                     # 再发送流式结束标记
                     await self.bus.publish_outbound(OutboundMessage(
                         channel=msg.channel,
@@ -5352,6 +5731,10 @@ policy: {policy}
             return effective_content or response
             
         except Exception as e:
+            if placeholder_task:
+                placeholder_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await placeholder_task
             # 清理缓冲区
             self._stream_buffers.pop(session_key, None)
             raise e

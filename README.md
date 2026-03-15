@@ -615,25 +615,81 @@ iflow-bot commands --help
 
 These commands are sent inside your chat app (Telegram/Feishu/DingTalk/etc.):
 
+```text
+/status
+/new
+/compact
+/help
+/cron list
+/cron add --name <name> --message <text> (--every <sec> | --cron "<expr>" | --at "<iso-datetime>") [--tz <tz>] [--channel <channel>] [--to <chat_id>] [--deliver true|false]
+/cron delete <id>
+/model set <name>
+/language <en-US|zh-CN>
+/skills find <keyword>
+/skills add <slug>
+/skills list
+/skills remove <slug>
+/skills update
+/ralph "<prompt>"
+/ralph answer <text>
+/ralph approve
+/ralph status
+/ralph stop
+/ralph resume
 ```
-/status                 Show status (model, session, compression count)
-/new                    Start a new conversation
-/compact                Manually compact current conversation
-/help                   Show help
-/cron list              List scheduled tasks
-/cron add ...           Add a task (see /help for args). In chat, channel/to auto-filled and deliver defaults to true
-/cron delete <id>       Delete a task
-/ralph "prompt"         Generate PRD for long task (asks clarifying questions first)
-/ralph answer <reply>   Answer Ralph clarifying questions
-/ralph approve|stop|status  Control Ralph loop
-/model set <name>       Switch model for new sessions
-/language <en-US|zh-CN> Set language
-/skills find <keyword>  Search skills (SkillHub)
-/skills add <slug>      Install skill to workspace/skills
-/skills list            List installed skills
-/skills remove <slug>   Uninstall skill
-/skills update          Upgrade installed skills
-```
+
+`/status`
+- Shows adapter mode, current model, streaming state, language, workspace path, stdio session id, estimated context tokens, and compaction count.
+
+`/new`
+- Starts a fresh conversation and clears prior runtime session context.
+
+`/compact`
+- Manually compacts the current stdio session.
+
+`/cron`
+- `list`: show all jobs.
+- `add`: if `--channel` and `--to` are omitted in chat, the bot auto-fills the current channel and chat id and defaults `--deliver true`.
+- `delete`: remove a job by id.
+
+`/model set <name>`
+- Persists the new default model. It applies to new sessions.
+
+`/language <en-US|zh-CN>`
+- Persists the chat language in `workspace/.iflow/settings.json`.
+- System replies and command output follow this language.
+
+`/skills`
+- Uses SkillHub CLI.
+- `add` installs into `workspace/skills` and then syncs installed skills into `~/.iflow/skills`.
+- `remove` removes the skill from both locations.
+- If SkillHub CLI is missing, the bot attempts automatic installation first.
+
+### Ralph Workflow
+
+`/ralph` is a reviewed long-task loop. It does not execute immediately after prompt creation.
+
+1. `/ralph "<prompt>"`
+   - Creates a Ralph run.
+   - Asks clarifying questions first when needed.
+2. `/ralph answer <text>`
+   - Sends your clarification answers.
+   - The bot generates `prd.json` and a markdown PRD preview.
+3. Review the full PRD output in chat and the saved files.
+4. `/ralph approve`
+   - Starts execution only after approval.
+5. `/ralph status`
+   - Shows current run status, run id, current story/pass, story id, subagent role, and current phase.
+6. `/ralph stop`
+   - Stops the current run and cancels the active Ralph subagent session.
+7. `/ralph resume`
+   - Resumes the latest unfinished run from its last saved state.
+
+Ralph behavior:
+- Only one Ralph run can execute at a time in the same chat.
+- A gateway restart auto-resumes unfinished Ralph runs in that chat.
+- Ralph uses a dedicated stdio adapter so ordinary chat commands such as `/help` and `/status` remain available during execution.
+- PRD preview is split into multiple chat messages when needed instead of truncating the content.
 
 ### SkillHub CLI (for /skills)
 
@@ -648,25 +704,38 @@ curl -fsSL https://skillhub-1388575217.cos.ap-guangzhou.myqcloud.com/install/ins
 
 ```
 ~/.iflow-bot/
-├── botpy.log                # QQ bot log
-├── config.json              # Configuration file
-├── gateway.pid              # PID file (background mode)
-├── gateway.log              # Gateway log
-├── session_mappings.json    # Session mappings
-├── workspace/               # iflow workspace
-│   ├── AGENTS.md            # Agent behavior guide
-│   ├── BOOT.md              # Boot configuration
-│   ├── HEARTBEAT.md         # Heartbeat tasks
-│   ├── IDENTITY.md          # Identity
-│   ├── SOUL.md              # AI personality definition
-│   ├── TOOLS.md             # Tool configuration
-│   ├── USER.md              # User info
-│   └── memory/              # Memory directory
-│       └── MEMORY.md        # Long-term memory
-└── data/                    # Data directory
-    └── cron/                # Scheduled tasks
-        └── jobs.json        # Task data
+├── config.json                    # Bot config
+├── gateway.log                    # Gateway log
+├── gateway.pid                    # PID file in daemon mode
+├── botpy.log                      # QQ SDK log (when enabled)
+├── data/
+│   ├── cron/
+│   │   └── jobs.json              # Cron jobs
+│   ├── media/                     # Downloaded media cache
+│   └── sessions/                  # Session metadata cache
+└── workspace/
+    ├── .iflow/
+    │   └── settings.json          # Per-workspace language and iflow settings
+    ├── AGENTS.md                  # Agent instructions
+    ├── BOOTSTRAP.md               # First-run bootstrap file (optional)
+    ├── HEARTBEAT.md               # Heartbeat prompt (optional)
+    ├── IDENTITY.md                # Identity prompt (optional)
+    ├── SOUL.md                    # Persona prompt (optional)
+    ├── TOOLS.md                   # Tool policy prompt (optional)
+    ├── USER.md                    # User profile prompt (optional)
+    ├── channel/
+    │   └── <channel>/<chat>-<date>.json  # Chat recorder output
+    ├── images/                    # Inbound images downloaded before calling iflow
+    ├── memory/
+    │   └── MEMORY.md              # Long-term memory
+    ├── project/                   # Ralph target project output directory
+    ├── ralph/
+    │   └── <chat_id>/<run_id>/    # Ralph PRD/state/progress files
+    └── skills/                    # Installed skills, synced to ~/.iflow/skills
 ```
+
+`workspace/skills` is the source of truth for installed skills.
+The bot syncs it into the iflow CLI skills directory (`~/.iflow/skills` on Linux) so subagents can load the same skills.
 
 ## 🔧 Development
 
