@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## v0.4.5 - 2026-03-16
+
+- fix(ralph): Seed a minimal FastAPI route test during Ralph verification prep so fresh API scaffolds no longer fall into recovery only because `pytest` collected zero tests.
+- fix(ralph): Strip internal completion markers from user-facing Ralph completion summaries while keeping `[RALPH_DONE]` only in persisted progress state.
+- test(ralph): Add regression coverage for FastAPI scaffold verification seeding and user-visible summary sanitization in `tests/test_ralph_runtime_guards.py`.
+- docs(ralph): Refresh README and README_CN with the exact supported Ralph commands, approval flow, status fields, auto-resume behavior, and non-blocking main-chat guarantees verified in Feishu E2E.
+
 ## v0.4.4 - 2026-03-16
 
 - feat(ralph): Add `/ralph resume`, richer `/ralph status` progress details, natural-language progress query routing, and automatic resume after gateway restart for unfinished runs.

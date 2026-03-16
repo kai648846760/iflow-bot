@@ -210,6 +210,17 @@ class _PendingTask:
         return False
 
 
+class _RestartablePendingTask:
+    def __init__(self) -> None:
+        self.cancelled = False
+
+    def done(self) -> bool:
+        return self.cancelled
+
+    def cancel(self) -> None:
+        self.cancelled = True
+
+
 def _set_language(workspace: Path, lang: str) -> None:
     settings_dir = workspace / ".iflow"
     settings_dir.mkdir(parents=True, exist_ok=True)
@@ -489,6 +500,25 @@ def test_ralph_targeted_story_hints_include_mypy_file_and_fix_guidance(tmp_path:
     assert "app/main.py:12" in hints
     assert "missing a return type annotation" in hints
     assert "explicit return type" in hints
+
+
+def test_ralph_targeted_story_hints_cover_pytest_no_untyped_def_guidance(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    project_dir = workspace / "project" / "demo"
+    tests_dir = project_dir / "tests"
+    tests_dir.mkdir(parents=True, exist_ok=True)
+    (tests_dir / "test_app.py").write_text("def test_index(client):\n    assert client.get('/').status_code == 200\n", encoding="utf-8")
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(workspace), model="glm-5", streaming=False)
+
+    hints = loop._ralph_targeted_story_hints(
+        story={"id": "US-001", "title": "项目初始化与基础架构", "role": "engineer"},
+        project_dir=project_dir,
+        latest_output="tests/test_app.py:13: error: Function is missing a return type annotation  [no-untyped-def]",
+    )
+
+    assert "tests/test_app.py:13" in hints
+    assert "pytest" in hints.lower()
+    assert "-> None" in hints
 
 
 def test_ralph_targeted_story_hints_cover_scaffold_dependency_gaps(tmp_path: Path):
@@ -1188,6 +1218,64 @@ async def test_ralph_collect_verification_evidence_prefers_pytest_failure_over_m
     assert "Success: no issues found" not in evidence
 
 
+@pytest.mark.asyncio
+async def test_ralph_collect_verification_evidence_reports_semantic_acceptance_gaps_after_green_checks(
+    tmp_path: Path,
+):
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(tmp_path / "workspace"), model="glm-5", streaming=False)
+    project_dir = tmp_path / "workspace" / "project" / "todolist"
+    venv_bin = project_dir / ".venv" / "bin"
+    venv_bin.mkdir(parents=True, exist_ok=True)
+
+    mypy_bin = venv_bin / "mypy"
+    mypy_bin.write_text("#!/bin/sh\necho 'Success: no issues found in 2 source files'\nexit 0\n", encoding="utf-8")
+    mypy_bin.chmod(0o755)
+
+    pytest_bin = venv_bin / "pytest"
+    pytest_bin.write_text("#!/bin/sh\necho '..\\n2 passed in 0.07s'\nexit 0\n", encoding="utf-8")
+    pytest_bin.chmod(0o755)
+
+    (project_dir / "templates").mkdir(parents=True, exist_ok=True)
+    (project_dir / "tests").mkdir(parents=True, exist_ok=True)
+    (project_dir / "app.py").write_text(
+        "from flask import Flask, render_template\n"
+        "app = Flask(__name__)\n"
+        "@app.route('/')\n"
+        "def index() -> str:\n"
+        "    return render_template('index.html', todos=[])\n",
+        encoding="utf-8",
+    )
+    (project_dir / "templates" / "index.html").write_text(
+        "<!doctype html><title>Todo</title><ul><li>demo</li></ul>\n",
+        encoding="utf-8",
+    )
+    (project_dir / "tests" / "test_app.py").write_text("def test_ok() -> None:\n    assert True\n", encoding="utf-8")
+    (project_dir / "todos.json").write_text("[]\n", encoding="utf-8")
+
+    evidence = await loop._ralph_collect_verification_evidence(
+        project_dir,
+        {
+            "id": "US-002",
+            "title": "新增任务功能",
+            "role": "engineer",
+            "acceptanceCriteria": [
+                "首页包含输入框和提交按钮",
+                "提交表单到路由 POST /add",
+                "任务写入 todos.json 文件",
+                "Tests pass",
+                "Typecheck passes",
+            ],
+        },
+    )
+
+    assert "Success: no issues found in 2 source files" in evidence
+    assert "2 passed in 0.07s" in evidence
+    assert "Missing route: /add" in evidence
+    assert "Missing homepage input field" in evidence
+    assert "Missing homepage submit button" in evidence
+    assert "Missing todo persistence write path" in evidence
+
+
 def test_ralph_ensure_hatchling_wheel_packages_for_app_project(tmp_path: Path):
     loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(tmp_path / "workspace"), model="glm-5", streaming=False)
     project_dir = tmp_path / "workspace" / "project" / "demo"
@@ -1204,6 +1292,18 @@ def test_ralph_ensure_hatchling_wheel_packages_for_app_project(tmp_path: Path):
     content = pyproject_path.read_text(encoding="utf-8")
     assert '[tool.hatch.build.targets.wheel]' in content
     assert 'packages = ["app"]' in content
+
+
+def test_ralph_verification_commands_include_windows_venv_scripts(tmp_path: Path):
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(tmp_path / "workspace"), model="glm-5", streaming=False)
+    project_dir = tmp_path / "workspace" / "project" / "demo"
+    scripts_dir = project_dir / ".venv" / "Scripts"
+    scripts_dir.mkdir(parents=True, exist_ok=True)
+    (scripts_dir / "mypy.exe").write_text("", encoding="utf-8")
+
+    commands = loop._ralph_verification_commands(project_dir, "mypy", ".")
+
+    assert commands[0] == [str(scripts_dir / "mypy.exe"), "."]
 
 
 def test_ralph_ensure_hatchling_wheel_packages_for_single_file_app_project(tmp_path: Path):
@@ -1344,6 +1444,529 @@ async def test_ralph_prepare_typecheck_environment_patches_single_file_hatchling
     assert "single-file app project" in evidence
     assert "$ uv sync --extra dev" in evidence
     assert "sync ok" in evidence
+
+
+@pytest.mark.asyncio
+async def test_ralph_prepare_typecheck_environment_creates_missing_declared_readme(monkeypatch, tmp_path: Path):
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(tmp_path / "workspace"), model="glm-5", streaming=False)
+    project_dir = tmp_path / "workspace" / "project" / "demo"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "app.py").write_text("from flask import Flask\napp = Flask(__name__)\n", encoding="utf-8")
+    (project_dir / "pyproject.toml").write_text(
+        "[project]\n"
+        "name='demo'\n"
+        "version='0.1.0'\n"
+        "readme='README.md'\n\n"
+        "[build-system]\n"
+        "requires=['hatchling']\n"
+        "build-backend='hatchling.build'\n",
+        encoding="utf-8",
+    )
+
+    class _Proc:
+        returncode = 0
+
+        async def communicate(self):
+            return (b"sync ok", None)
+
+    async def _fake_create_subprocess_exec(*cmd, **kwargs):
+        return _Proc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+
+    evidence = await loop._ralph_prepare_typecheck_environment(
+        project_dir,
+        {"acceptanceCriteria": ["实现功能", "Typecheck passes"]},
+    )
+
+    assert (project_dir / "README.md").exists()
+    assert "Created missing README.md" in evidence
+    assert "$ uv sync --extra dev" in evidence
+
+
+@pytest.mark.asyncio
+async def test_ralph_prepare_typecheck_environment_rewrites_flask_responsereturnvalue_import(monkeypatch, tmp_path: Path):
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(tmp_path / "workspace"), model="glm-5", streaming=False)
+    project_dir = tmp_path / "workspace" / "project" / "demo"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    app_path = project_dir / "app.py"
+    app_path.write_text(
+        "from flask import Flask, render_template, ResponseReturnValue\n"
+        "app = Flask(__name__)\n"
+        "@app.route('/')\n"
+        "def index() -> ResponseReturnValue:\n"
+        "    return render_template('index.html')\n",
+        encoding="utf-8",
+    )
+    (project_dir / "pyproject.toml").write_text(
+        "[project]\nname='demo'\nversion='0.1.0'\n\n[build-system]\nrequires=['hatchling']\nbuild-backend='hatchling.build'\n",
+        encoding="utf-8",
+    )
+
+    class _Proc:
+        returncode = 0
+
+        async def communicate(self):
+            return (b"sync ok", None)
+
+    async def _fake_create_subprocess_exec(*cmd, **kwargs):
+        return _Proc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+
+    evidence = await loop._ralph_prepare_typecheck_environment(
+        project_dir,
+        {"acceptanceCriteria": ["实现功能", "Typecheck passes"]},
+    )
+
+    content = app_path.read_text(encoding="utf-8")
+    assert "from flask.typing import ResponseReturnValue" in content
+    assert "from flask import Flask, render_template" in content
+    assert "Normalized Flask ResponseReturnValue import" in evidence
+
+
+@pytest.mark.asyncio
+async def test_ralph_prepare_typecheck_environment_removes_unsatisfiable_types_flask_for_modern_flask(
+    monkeypatch,
+    tmp_path: Path,
+):
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(tmp_path / "workspace"), model="glm-5", streaming=False)
+    project_dir = tmp_path / "workspace" / "project" / "demo"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "pyproject.toml").write_text(
+        "[project]\n"
+        "name='demo'\n"
+        "version='0.1.0'\n"
+        "dependencies = [\n"
+        '    "flask>=3.0.0",\n'
+        "]\n\n"
+        "[project.optional-dependencies]\n"
+        "dev = [\n"
+        '    "pytest>=8.0.0",\n'
+        '    "mypy>=1.8.0",\n'
+        '    "types-Flask>=3.0.0",\n'
+        "]\n\n"
+        "[build-system]\n"
+        "requires=['hatchling']\n"
+        "build-backend='hatchling.build'\n",
+        encoding="utf-8",
+    )
+
+    class _Proc:
+        returncode = 0
+
+        async def communicate(self):
+            return (b"sync ok", None)
+
+    async def _fake_create_subprocess_exec(*cmd, **kwargs):
+        return _Proc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+
+    evidence = await loop._ralph_prepare_typecheck_environment(
+        project_dir,
+        {"acceptanceCriteria": ["实现功能", "Typecheck passes"]},
+    )
+
+    content = (project_dir / "pyproject.toml").read_text(encoding="utf-8")
+    assert '"flask>=3.0.0"' in content
+    assert "types-Flask" not in content
+    assert "Removed unsatisfiable types-Flask dependency" in evidence
+    assert "$ uv sync --extra dev" in evidence
+
+
+@pytest.mark.asyncio
+async def test_ralph_prepare_typecheck_environment_seeds_minimal_flask_route_test(monkeypatch, tmp_path: Path):
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(tmp_path / "workspace"), model="glm-5", streaming=False)
+    project_dir = tmp_path / "workspace" / "project" / "demo"
+    templates_dir = project_dir / "templates"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    templates_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "app.py").write_text(
+        "from flask import Flask, render_template\n"
+        "app = Flask(__name__)\n"
+        "@app.route('/')\n"
+        "def index() -> str:\n"
+        "    return render_template('index.html')\n",
+        encoding="utf-8",
+    )
+    (templates_dir / "index.html").write_text("<h1>Todo List</h1>\n", encoding="utf-8")
+    (project_dir / "pyproject.toml").write_text(
+        "[project]\nname='demo'\nversion='0.1.0'\n\n[build-system]\nrequires=['hatchling']\nbuild-backend='hatchling.build'\n",
+        encoding="utf-8",
+    )
+
+    class _Proc:
+        returncode = 0
+
+        async def communicate(self):
+            return (b"sync ok", None)
+
+    async def _fake_create_subprocess_exec(*cmd, **kwargs):
+        return _Proc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+
+    evidence = await loop._ralph_prepare_typecheck_environment(
+        project_dir,
+        {"title": "项目初始化与基础架构", "acceptanceCriteria": ["Tests pass", "Typecheck passes"]},
+    )
+
+    test_path = project_dir / "tests" / "test_app.py"
+    assert test_path.exists()
+    content = test_path.read_text(encoding="utf-8")
+    assert "client.get('/')" in content or 'client.get("/")' in content
+    assert "status_code == 200" in content
+    assert "Seeded minimal Flask route test" in evidence
+
+
+@pytest.mark.asyncio
+async def test_ralph_prepare_typecheck_environment_seeds_minimal_fastapi_route_test(monkeypatch, tmp_path: Path):
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(tmp_path / "workspace"), model="glm-5", streaming=False)
+    project_dir = tmp_path / "workspace" / "project" / "demo"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "main.py").write_text(
+        "from fastapi import FastAPI\n\n"
+        "app = FastAPI()\n\n"
+        "@app.get('/')\n"
+        "async def root() -> dict[str, str]:\n"
+        "    return {'status': 'ok'}\n",
+        encoding="utf-8",
+    )
+    (project_dir / "pyproject.toml").write_text(
+        "[project]\nname='demo'\nversion='0.1.0'\n\n[build-system]\nrequires=['hatchling']\nbuild-backend='hatchling.build'\n",
+        encoding="utf-8",
+    )
+
+    class _Proc:
+        returncode = 0
+
+        async def communicate(self):
+            return (b"sync ok", None)
+
+    async def _fake_create_subprocess_exec(*cmd, **kwargs):
+        return _Proc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+
+    evidence = await loop._ralph_prepare_typecheck_environment(
+        project_dir,
+        {"title": "项目初始化与基础架构", "acceptanceCriteria": ["Tests pass", "Typecheck passes"]},
+    )
+
+    test_path = project_dir / "tests" / "test_api.py"
+    assert test_path.exists()
+    content = test_path.read_text(encoding="utf-8")
+    assert "TestClient" in content
+    assert "client.get('/')" in content or 'client.get("/")' in content
+    assert "status_code == 200" in content
+    assert "Seeded minimal FastAPI route test" in evidence
+
+
+@pytest.mark.asyncio
+async def test_ralph_prepare_typecheck_environment_seeds_minimal_flask_scaffold_story(monkeypatch, tmp_path: Path):
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(tmp_path / "workspace"), model="glm-5", streaming=False)
+    project_dir = tmp_path / "workspace" / "project" / "demo"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "pyproject.toml").write_text(
+        "[project]\n"
+        "name='demo'\n"
+        "version='0.1.0'\n"
+        "readme='README.md'\n\n"
+        "[build-system]\n"
+        "requires=['hatchling']\n"
+        "build-backend='hatchling.build'\n",
+        encoding="utf-8",
+    )
+
+    class _Proc:
+        returncode = 0
+
+        async def communicate(self):
+            return (b"sync ok", None)
+
+    async def _fake_create_subprocess_exec(*cmd, **kwargs):
+        return _Proc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+
+    evidence = await loop._ralph_prepare_typecheck_environment(
+        project_dir,
+        {
+            "title": "项目初始化与基础架构",
+            "acceptanceCriteria": [
+                "必须包含文件: pyproject.toml、app.py、templates/index.html、todos.json",
+                "app.py 作为入口文件（不使用 main.py）",
+                "访问首页 / 返回 HTTP 200",
+                "Tests pass",
+                "Typecheck passes",
+            ],
+        },
+    )
+
+    assert (project_dir / "app.py").exists()
+    assert (project_dir / "templates" / "index.html").exists()
+    assert (project_dir / "todos.json").exists()
+    assert (project_dir / "tests" / "test_app.py").exists()
+    assert "Seeded minimal Flask scaffold" in evidence
+
+
+@pytest.mark.asyncio
+async def test_ralph_prepare_typecheck_environment_seeds_add_route_story(monkeypatch, tmp_path: Path):
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(tmp_path / "workspace"), model="glm-5", streaming=False)
+    project_dir = tmp_path / "workspace" / "project" / "demo"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "app.py").write_text(
+        '"""Todo List Web Application entry point."""\n\n'
+        "import json\n"
+        "from pathlib import Path\n"
+        "from typing import TypedDict\n\n"
+        "from flask import Flask, render_template\n"
+        "from flask.typing import ResponseReturnValue\n\n"
+        "class TodoItem(TypedDict):\n"
+        "    id: int\n"
+        "    content: str\n"
+        "    completed: bool\n\n"
+        "app = Flask(__name__)\n"
+        'TODOS_FILE = Path(__file__).parent / "todos.json"\n\n'
+        "def load_todos() -> list[TodoItem]:\n"
+        "    return []\n\n"
+        "@app.route('/')\n"
+        "def index() -> ResponseReturnValue:\n"
+        '    return render_template("index.html", todos=load_todos())\n',
+        encoding="utf-8",
+    )
+    (project_dir / "templates").mkdir(parents=True, exist_ok=True)
+    (project_dir / "templates" / "index.html").write_text(
+        "<ul>{% for todo in todos %}<li>{{ todo.content }}</li>{% endfor %}</ul>\n",
+        encoding="utf-8",
+    )
+    (project_dir / "tests").mkdir(parents=True, exist_ok=True)
+    (project_dir / "tests" / "test_app.py").write_text(
+        "from app import app\n"
+        "def test_index_returns_200() -> None:\n"
+        "    app.config['TESTING'] = True\n"
+        "    with app.test_client() as client:\n"
+        "        response = client.get('/')\n"
+        "    assert response.status_code == 200\n",
+        encoding="utf-8",
+    )
+    (project_dir / "pyproject.toml").write_text(
+        "[project]\nname='demo'\nversion='0.1.0'\n\n[build-system]\nrequires=['hatchling']\nbuild-backend='hatchling.build'\n",
+        encoding="utf-8",
+    )
+
+    class _Proc:
+        returncode = 0
+
+        async def communicate(self):
+            return (b"sync ok", None)
+
+    async def _fake_create_subprocess_exec(*cmd, **kwargs):
+        return _Proc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+
+    evidence = await loop._ralph_prepare_typecheck_environment(
+        project_dir,
+        {
+            "title": "新增任务功能",
+            "acceptanceCriteria": [
+                "首页包含输入框和提交按钮",
+                "提交表单到路由 POST /add",
+                "任务写入 todos.json 文件",
+                "Tests pass",
+                "Typecheck passes",
+            ],
+        },
+    )
+
+    app_text = (project_dir / "app.py").read_text(encoding="utf-8")
+    template_text = (project_dir / "templates" / "index.html").read_text(encoding="utf-8")
+    tests_text = (project_dir / "tests" / "test_app.py").read_text(encoding="utf-8")
+    assert '@app.route("/add", methods=["POST"])' in app_text
+    assert "def save_todos" in app_text
+    assert "json.dump" in app_text
+    assert 'action="/add"' in template_text
+    assert 'name="content"' in template_text
+    assert "test_add_todo_success" in tests_text
+    assert "Seeded Flask todo route support for /add" in evidence
+
+
+@pytest.mark.asyncio
+async def test_ralph_prepare_typecheck_environment_seeds_complete_route_story(monkeypatch, tmp_path: Path):
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(tmp_path / "workspace"), model="glm-5", streaming=False)
+    project_dir = tmp_path / "workspace" / "project" / "demo"
+    templates_dir = project_dir / "templates"
+    tests_dir = project_dir / "tests"
+    templates_dir.mkdir(parents=True, exist_ok=True)
+    tests_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "app.py").write_text(
+        "import json\n"
+        "from pathlib import Path\n"
+        "from typing import Any\n"
+        "from flask import Flask, redirect, render_template, request, url_for\n"
+        "app = Flask(__name__)\n"
+        "TODOS_FILE = Path(__file__).parent / 'todos.json'\n"
+        "def load_todos() -> list[dict[str, Any]]:\n"
+        "    return []\n"
+        "def save_todos(todos: list[dict[str, Any]]) -> None:\n"
+        "    pass\n"
+        "@app.route('/')\n"
+        "def index() -> str:\n"
+        "    return render_template('index.html', todos=[])\n",
+        encoding="utf-8",
+    )
+    (templates_dir / "index.html").write_text(
+        "<ul>{% for todo in todos %}<li>{{ todo.get('content', '') }}</li>{% endfor %}</ul>\n",
+        encoding="utf-8",
+    )
+    (tests_dir / "test_app.py").write_text(
+        "from app import app\n"
+        "def test_index_returns_200() -> None:\n"
+        "    app.config['TESTING'] = True\n"
+        "    with app.test_client() as client:\n"
+        "        response = client.get('/')\n"
+        "    assert response.status_code == 200\n",
+        encoding="utf-8",
+    )
+    (project_dir / "pyproject.toml").write_text(
+        "[project]\nname='demo'\nversion='0.1.0'\n\n[build-system]\nrequires=['hatchling']\nbuild-backend='hatchling.build'\n",
+        encoding="utf-8",
+    )
+
+    class _Proc:
+        returncode = 0
+
+        async def communicate(self):
+            return (b"sync ok", None)
+
+    async def _fake_create_subprocess_exec(*cmd, **kwargs):
+        return _Proc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+
+    evidence = await loop._ralph_prepare_typecheck_environment(
+        project_dir,
+        {
+            "title": "完成任务功能",
+            "acceptanceCriteria": [
+                "提交到路由 POST /complete/<id>",
+                "completed 状态写回 todos.json",
+                "已完成任务有明显视觉样式区分（如删除线或灰色）",
+                "Tests pass",
+                "Typecheck passes",
+            ],
+        },
+    )
+
+    app_text = (project_dir / "app.py").read_text(encoding="utf-8")
+    template_text = (templates_dir / "index.html").read_text(encoding="utf-8")
+    tests_text = (tests_dir / "test_app.py").read_text(encoding="utf-8")
+    assert "/complete/<int:todo_id>" in app_text
+    assert 'action="/complete/{{ todo.get(\'id\', 0) }}"' in template_text
+    assert "test_complete_toggles_todo" in tests_text
+    assert "Seeded Flask todo route support for /complete/<id>" in evidence
+
+
+@pytest.mark.asyncio
+async def test_ralph_prepare_typecheck_environment_seeds_delete_route_story(monkeypatch, tmp_path: Path):
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(tmp_path / "workspace"), model="glm-5", streaming=False)
+    project_dir = tmp_path / "workspace" / "project" / "demo"
+    templates_dir = project_dir / "templates"
+    tests_dir = project_dir / "tests"
+    templates_dir.mkdir(parents=True, exist_ok=True)
+    tests_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "app.py").write_text(
+        "import json\n"
+        "from pathlib import Path\n"
+        "from typing import Any\n"
+        "from flask import Flask, redirect, render_template, request, url_for\n"
+        "app = Flask(__name__)\n"
+        "TODOS_FILE = Path(__file__).parent / 'todos.json'\n"
+        "def load_todos() -> list[dict[str, Any]]:\n"
+        "    return []\n"
+        "def save_todos(todos: list[dict[str, Any]]) -> None:\n"
+        "    pass\n"
+        "@app.route('/')\n"
+        "def index() -> str:\n"
+        "    return render_template('index.html', todos=[])\n",
+        encoding="utf-8",
+    )
+    (templates_dir / "index.html").write_text(
+        "<ul>{% for todo in todos %}<li>{{ todo.get('content', '') }}</li>{% endfor %}</ul>\n",
+        encoding="utf-8",
+    )
+    (tests_dir / "test_app.py").write_text(
+        "from app import app\n"
+        "def test_index_returns_200() -> None:\n"
+        "    app.config['TESTING'] = True\n"
+        "    with app.test_client() as client:\n"
+        "        response = client.get('/')\n"
+        "    assert response.status_code == 200\n",
+        encoding="utf-8",
+    )
+    (project_dir / "pyproject.toml").write_text(
+        "[project]\nname='demo'\nversion='0.1.0'\n\n[build-system]\nrequires=['hatchling']\nbuild-backend='hatchling.build'\n",
+        encoding="utf-8",
+    )
+
+    class _Proc:
+        returncode = 0
+
+        async def communicate(self):
+            return (b"sync ok", None)
+
+    async def _fake_create_subprocess_exec(*cmd, **kwargs):
+        return _Proc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+
+    evidence = await loop._ralph_prepare_typecheck_environment(
+        project_dir,
+        {
+            "title": "删除任务功能",
+            "acceptanceCriteria": [
+                "提交到路由 POST /delete/<id>",
+                "todos.json 中删除对应记录",
+                "页面上移除该任务",
+                "Tests pass",
+                "Typecheck passes",
+            ],
+        },
+    )
+
+    app_text = (project_dir / "app.py").read_text(encoding="utf-8")
+    template_text = (templates_dir / "index.html").read_text(encoding="utf-8")
+    tests_text = (tests_dir / "test_app.py").read_text(encoding="utf-8")
+    assert "/delete/<int:todo_id>" in app_text
+    assert 'action="/delete/{{ todo.get(\'id\', 0) }}"' in template_text
+    assert "test_delete_removes_todo" in tests_text
+    assert "Seeded Flask todo route support for /delete/<id>" in evidence
+
+
+def test_ralph_semantic_acceptance_gaps_accepts_typed_flask_route_placeholders(tmp_path: Path):
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(tmp_path / "workspace"), model="glm-5", streaming=False)
+    project_dir = tmp_path / "workspace" / "project" / "demo"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "app.py").write_text(
+        "from flask import Flask\n"
+        "app = Flask(__name__)\n"
+        "@app.route('/complete/<int:todo_id>', methods=['POST'])\n"
+        "def complete_todo(todo_id: int) -> str:\n"
+        "    return 'ok'\n",
+        encoding="utf-8",
+    )
+
+    gaps = loop._ralph_semantic_acceptance_gaps(
+        project_dir,
+        {
+            "title": "完成任务功能",
+            "acceptanceCriteria": ["提交到路由 POST /complete/<id>"],
+        },
+    )
+
+    assert "Missing route: /complete/<id>" not in gaps
 
 
 def test_ralph_syncs_misplaced_run_dir_outputs_into_project_dir(tmp_path: Path):
@@ -1660,6 +2283,105 @@ async def test_ralph_running_state_is_auto_resumed_on_startup(tmp_path: Path):
     loop.stop()
 
     assert calls == [("feishu", "ou_test", run_dir)]
+    persisted = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+    assert persisted["status"] == "approved"
+
+
+@pytest.mark.asyncio
+async def test_ralph_supervisor_auto_resumes_running_state_when_task_is_missing(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    channel = _FakeChannel()
+    loop = AgentLoop(
+        bus=MessageBus(),
+        adapter=_FakeAdapter(workspace),
+        model="glm-5",
+        streaming=False,
+        channel_manager=_FakeChannelManager(channel),
+    )
+
+    chat_id = "ou_stale"
+    run_id = "run-stale"
+    run_dir = loop._ralph_run_dir(chat_id, run_id)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    loop._ralph_set_current(chat_id, run_id)
+    (run_dir / "prd.json").write_text('{"stories":[{"title":"Investigate","passes":1}]}', encoding="utf-8")
+    loop._ralph_save_state(
+        run_dir,
+        {
+            "run_id": run_id,
+            "status": "running",
+            "channel": "feishu",
+            "heartbeat_at": time.time() - 600,
+        },
+    )
+
+    calls: list[tuple[str, str, Path]] = []
+
+    async def _fake_run_loop(channel_name: str, chat: str, path: Path) -> None:
+        calls.append((channel_name, chat, path))
+        loop._ralph_tasks.pop(chat, None)
+
+    loop._ralph_run_loop = _fake_run_loop  # type: ignore[method-assign]
+
+    await loop._ralph_supervisor_scan_once()
+    await asyncio.sleep(0.05)
+
+    assert calls == [("feishu", chat_id, run_dir)]
+    persisted = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+    assert persisted["status"] == "approved"
+
+
+@pytest.mark.asyncio
+async def test_ralph_supervisor_restarts_stale_live_task_after_heartbeat_timeout(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    channel = _FakeChannel()
+    fake_client = _FakeRalphClient()
+    stdio = _FakeRalphStdio(fake_client)
+    loop = AgentLoop(
+        bus=MessageBus(),
+        adapter=_FakeRalphAdapter(workspace, stdio),
+        model="glm-5",
+        streaming=False,
+        channel_manager=_FakeChannelManager(channel),
+    )
+
+    chat_id = "ou_restart"
+    run_id = "run-restart"
+    run_dir = loop._ralph_run_dir(chat_id, run_id)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    loop._ralph_set_current(chat_id, run_id)
+    (run_dir / "prd.json").write_text('{"stories":[{"title":"Investigate","passes":1}]}', encoding="utf-8")
+    loop._ralph_save_state(
+        run_dir,
+        {
+            "run_id": run_id,
+            "status": "running",
+            "channel": "feishu",
+            "current_phase": "executing",
+            "heartbeat_at": time.time() - 600,
+        },
+    )
+
+    stale_task = _RestartablePendingTask()
+    loop._ralph_tasks[chat_id] = stale_task  # type: ignore[assignment]
+    loop._ralph_active_sessions[chat_id] = "ralph-session-stale"
+
+    calls: list[tuple[str, str, Path]] = []
+
+    async def _fake_run_loop(channel_name: str, chat: str, path: Path) -> None:
+        calls.append((channel_name, chat, path))
+        loop._ralph_tasks.pop(chat, None)
+
+    loop._ralph_run_loop = _fake_run_loop  # type: ignore[method-assign]
+
+    await loop._ralph_supervisor_scan_once()
+    await asyncio.sleep(0.05)
+
+    assert stale_task.cancelled is True
+    assert fake_client.cancel_calls == ["ralph-session-stale"]
+    assert calls == [("feishu", chat_id, run_dir)]
     persisted = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
     assert persisted["status"] == "approved"
 
@@ -3227,6 +3949,53 @@ async def test_ralph_retry_incomplete_story_treats_prompt_callbacks_as_activity(
 
 
 @pytest.mark.asyncio
+async def test_ralph_retry_incomplete_story_refreshes_run_heartbeat_during_recovery(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    fake_client = _RecoveryHeartbeatClient()
+    stdio = _FakeRalphStdio(fake_client)
+    adapter = _FakeRalphAdapter(workspace, stdio)
+    loop = AgentLoop(bus=MessageBus(), adapter=adapter, model="glm-5", streaming=False)
+    loop._ralph_recovery_idle_watchdog_seconds = 0.05
+    loop._ralph_prompt_poll_seconds = 0.01
+
+    run_dir = workspace / "ralph" / "chat" / "run-recovery-heartbeat-refresh"
+    project_dir = workspace / "project" / "demo"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    project_dir.mkdir(parents=True, exist_ok=True)
+
+    stale_heartbeat = time.time() - 600
+    loop._ralph_save_state(
+        run_dir,
+        {
+            "run_id": "run-recovery-heartbeat-refresh",
+            "status": "running",
+            "channel": "feishu",
+            "current_phase": "recovery",
+            "heartbeat_at": stale_heartbeat,
+            "updated_at_wall": stale_heartbeat,
+        },
+    )
+
+    response = await loop._ralph_retry_incomplete_story(
+        stdio=stdio,
+        run_dir=run_dir,
+        project_dir=project_dir,
+        story={"id": "US-001", "title": "实现 list 命令", "role": "engineer", "acceptanceCriteria": ["Tests pass"]},
+        chat_id="ou_test",
+        latest_output="",
+        failure_reason="",
+    )
+
+    state = loop._ralph_load_state(run_dir)
+
+    assert response.error is None
+    assert response.content == "恢复完成"
+    assert state["current_phase"] == "recovery"
+    assert float(state["heartbeat_at"]) > stale_heartbeat
+
+
+@pytest.mark.asyncio
 async def test_ralph_retry_incomplete_story_grants_initial_grace_before_idle_watchdog(tmp_path: Path):
     workspace = tmp_path / "workspace"
     workspace.mkdir(parents=True, exist_ok=True)
@@ -3347,6 +4116,26 @@ async def test_ralph_retry_incomplete_story_does_not_trigger_idle_after_real_fix
         AgentLoop,
         "_ralph_collect_verification_evidence",
         lambda self, project_dir, story: asyncio.sleep(0, result=""),
+    )
+    monkeypatch.setattr(
+        AgentLoop,
+        "_ralph_verification_passed",
+        lambda self, project_dir, story: asyncio.sleep(0, result=(project_dir / "app.py").exists()),
+    )
+    monkeypatch.setattr(
+        AgentLoop,
+        "_ralph_verification_passed",
+        lambda self, project_dir, story: asyncio.sleep(0, result=(project_dir / "app.py").exists()),
+    )
+    monkeypatch.setattr(
+        AgentLoop,
+        "_ralph_verification_passed",
+        lambda self, project_dir, story: asyncio.sleep(0, result=(project_dir / "app.py").exists()),
+    )
+    monkeypatch.setattr(
+        AgentLoop,
+        "_ralph_verification_passed",
+        lambda self, project_dir, story: asyncio.sleep(0, result=(project_dir / "app.py").exists()),
     )
     monkeypatch.setattr(
         AgentLoop,
@@ -3507,6 +4296,36 @@ def test_ralph_targeted_story_hints_cover_pytest_fixture_generator_annotations(t
     assert "Iterator" in hints
 
 
+def test_ralph_targeted_story_hints_cover_pytest_missing_parameter_annotations(tmp_path: Path):
+    project_dir = tmp_path / "workspace" / "project" / "todolist"
+    tests_dir = project_dir / "tests"
+    tests_dir.mkdir(parents=True, exist_ok=True)
+    (tests_dir / "test_app.py").write_text(
+        "import pytest\n"
+        "from flask.testing import FlaskClient\n"
+        "@pytest.fixture\n"
+        "def client() -> FlaskClient:\n"
+        "    ...\n"
+        "def test_index(client, monkeypatch):\n"
+        "    assert client is not None\n",
+        encoding="utf-8",
+    )
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(tmp_path / "workspace"), model="glm-5", streaming=False)
+
+    hints = loop._ralph_targeted_story_hints(
+        story={"role": "engineer", "title": "项目初始化与基础架构", "acceptanceCriteria": ["Tests pass", "Typecheck passes"]},
+        project_dir=project_dir,
+        latest_output=(
+            "Supervisor verification evidence:\n"
+            "tests/test_app.py:6: error: Function is missing a type annotation  [no-untyped-def]\n"
+        ),
+    )
+
+    assert "tests/test_app.py:6" in hints
+    assert "FlaskClient" in hints
+    assert "MonkeyPatch" in hints or "pytest.MonkeyPatch" in hints
+
+
 def test_ralph_targeted_story_hints_cover_warn_return_any_from_json_load(tmp_path: Path):
     project_dir = tmp_path / "workspace" / "project" / "todolist"
     project_dir.mkdir(parents=True, exist_ok=True)
@@ -3532,6 +4351,78 @@ def test_ralph_targeted_story_hints_cover_warn_return_any_from_json_load(tmp_pat
     assert "json.load" in hints
     assert "cast" in hints.lower()
     assert "normalize" in hints.lower() or "validate" in hints.lower()
+
+
+def test_ralph_targeted_story_hints_cover_todo_collection_arg_type_mismatch(tmp_path: Path):
+    project_dir = tmp_path / "workspace" / "project" / "todolist"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "app.py").write_text(
+        "def save_todos(todos: list[dict[str, str | bool]]) -> None:\n"
+        "    ...\n",
+        encoding="utf-8",
+    )
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(tmp_path / "workspace"), model="glm-5", streaming=False)
+
+    hints = loop._ralph_targeted_story_hints(
+        story={"role": "engineer", "title": "项目初始化与基础架构", "acceptanceCriteria": ["Typecheck passes"]},
+        project_dir=project_dir,
+        latest_output=(
+            "Supervisor verification evidence:\n"
+            "tests/test_app.py:108: error: Argument 1 to \"save_todos\" has incompatible type \"list[dict[str, object]]\"; expected \"list[dict[str, str | bool]]\"  [arg-type]\n"
+        ),
+    )
+
+    assert "tests/test_app.py:108" in hints
+    assert "TypedDict" in hints or "shared todo type" in hints.lower() or "consistent" in hints.lower()
+
+
+def test_ralph_targeted_story_hints_cover_builtin_any_used_as_type(tmp_path: Path):
+    project_dir = tmp_path / "workspace" / "project" / "todolist"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "app.py").write_text(
+        "def load_todos() -> list[dict[str, any]]:\n"
+        "    return []\n",
+        encoding="utf-8",
+    )
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(tmp_path / "workspace"), model="glm-5", streaming=False)
+
+    hints = loop._ralph_targeted_story_hints(
+        story={"role": "engineer", "title": "项目初始化与基础架构搭建", "acceptanceCriteria": ["Typecheck passes"]},
+        project_dir=project_dir,
+        latest_output=(
+            "Supervisor verification evidence:\n"
+            "app.py:11: error: Function \"builtins.any\" is not valid as a type  [valid-type]\n"
+            "app.py:11: note: Perhaps you meant \"typing.Any\" instead of \"any\"?\n"
+        ),
+    )
+
+    assert "app.py:11" in hints
+    assert "typing.Any" in hints
+    assert "instead of `any`" in hints or "不要把 `any` 当成类型" in hints
+
+
+def test_ralph_targeted_story_hints_cover_flask_response_return_value_import_path(tmp_path: Path):
+    project_dir = tmp_path / "workspace" / "project" / "todolist"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "app.py").write_text(
+        "from flask import Flask, ResponseReturnValue\n"
+        "app = Flask(__name__)\n",
+        encoding="utf-8",
+    )
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(tmp_path / "workspace"), model="glm-5", streaming=False)
+
+    hints = loop._ralph_targeted_story_hints(
+        story={"role": "engineer", "title": "项目初始化与基础架构", "acceptanceCriteria": ["Typecheck passes"]},
+        project_dir=project_dir,
+        latest_output=(
+            "Supervisor verification evidence:\n"
+            "app.py:7: error: Module \"flask\" has no attribute \"ResponseReturnValue\"  [attr-defined]\n"
+        ),
+    )
+
+    assert "app.py:7" in hints
+    assert "ResponseReturnValue" in hints
+    assert "flask.typing" in hints
 
 
 def test_ralph_targeted_story_hints_cover_flask_test_response_json_narrowing(tmp_path: Path):
@@ -3689,6 +4580,111 @@ def test_ralph_extract_explicit_artifact_paths_ignores_urls_in_acceptance_criter
     assert all("//127.0.0.1" not in item for item in rendered)
 
 
+def test_ralph_extract_explicit_artifact_paths_ignore_output_dir_and_forbidden_main_py(tmp_path: Path):
+    project_dir = tmp_path / "workspace" / "project" / "todolist"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(tmp_path / "workspace"), model="glm-5", streaming=False)
+
+    paths = loop._ralph_extract_explicit_artifact_paths(
+        {
+            "role": "engineer",
+            "title": "项目初始化与基础架构",
+            "acceptanceCriteria": [
+                f"输出目录: {project_dir}",
+                "必须包含文件: pyproject.toml、app.py、templates/index.html、todos.json",
+                "app.py 作为入口文件（不使用 main.py）",
+            ],
+        },
+        project_dir=project_dir,
+    )
+
+    rendered = {str(path) for path in paths}
+    assert str(project_dir / "pyproject.toml") in rendered
+    assert str(project_dir / "app.py") in rendered
+    assert str(project_dir / "templates/index.html") in rendered
+    assert str(project_dir / "todos.json") in rendered
+    assert str(project_dir) not in rendered
+    assert str(project_dir / "main.py") not in rendered
+
+
+def test_ralph_semantic_acceptance_gaps_ignore_absolute_output_directory_paths(tmp_path: Path):
+    project_dir = tmp_path / "workspace" / "project" / "todolist"
+    templates_dir = project_dir / "templates"
+    tests_dir = project_dir / "tests"
+    templates_dir.mkdir(parents=True, exist_ok=True)
+    tests_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "pyproject.toml").write_text(
+        '[project]\nname="todolist"\nversion="0.1.0"\n',
+        encoding="utf-8",
+    )
+    (project_dir / "app.py").write_text(
+        "from flask import Flask, render_template\n"
+        "app = Flask(__name__)\n"
+        "@app.route('/')\n"
+        "def index() -> str:\n"
+        "    return render_template('index.html')\n",
+        encoding="utf-8",
+    )
+    (templates_dir / "index.html").write_text("<h1>Todo List</h1>\n", encoding="utf-8")
+    (project_dir / "todos.json").write_text("[]\n", encoding="utf-8")
+    (tests_dir / "test_app.py").write_text("def test_placeholder() -> None:\n    assert True\n", encoding="utf-8")
+
+    story = {
+        "role": "engineer",
+        "title": "项目初始化与基础架构",
+        "acceptanceCriteria": [
+            "输出目录: /Users/LokiTina/.iflow-bot/workspace/project/todolist",
+            "必须包含文件: pyproject.toml、app.py、templates/index.html、todos.json",
+            "app.py 作为入口文件（不使用 main.py）",
+            "todos.json 初始化为空数组 []",
+            "启动命令: uv run python app.py",
+            "访问首页 / 返回 HTTP 200",
+            "Tests pass",
+            "Typecheck passes",
+        ],
+    }
+
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(tmp_path / "workspace"), model="glm-5", streaming=False)
+
+    gaps = loop._ralph_semantic_acceptance_gaps(project_dir, story)
+
+    assert all("missing route: /users/" not in gap.lower() for gap in gaps)
+
+
+def test_ralph_targeted_story_hints_ignore_absolute_output_directory_paths(tmp_path: Path):
+    project_dir = tmp_path / "workspace" / "project" / "todolist"
+    templates_dir = project_dir / "templates"
+    templates_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "app.py").write_text(
+        "from flask import Flask, render_template\n"
+        "app = Flask(__name__)\n"
+        "@app.route('/')\n"
+        "def index() -> str:\n"
+        "    return render_template('index.html')\n",
+        encoding="utf-8",
+    )
+    (templates_dir / "index.html").write_text("<h1>Todo List</h1>\n", encoding="utf-8")
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(tmp_path / "workspace"), model="glm-5", streaming=False)
+
+    hints = loop._ralph_targeted_story_hints(
+        story={
+            "role": "engineer",
+            "title": "项目初始化与基础架构",
+            "acceptanceCriteria": [
+                "输出目录: /Users/LokiTina/.iflow-bot/workspace/project/todolist",
+                "app.py 作为入口文件（不使用 main.py）",
+                "访问首页 / 返回 HTTP 200",
+                "Tests pass",
+                "Typecheck passes",
+            ],
+        },
+        project_dir=project_dir,
+        latest_output="Supervisor verification evidence:\napp.py:4: error: Function is missing a return type annotation  [no-untyped-def]",
+    )
+
+    assert "/users/lokitina/.iflow-bot/workspace/project/todolist" not in hints.lower()
+
+
 def test_ralph_build_recovery_prompt_prioritizes_missing_required_artifacts(tmp_path: Path):
     workspace = tmp_path / "workspace"
     run_dir = workspace / "ralph" / "ou_test" / "run-1"
@@ -3725,6 +4721,57 @@ def test_ralph_build_recovery_prompt_prioritizes_missing_required_artifacts(tmp_
     assert "templates/index.html" in prompt
     assert "todos.json" in prompt
     assert "Create every missing required artifact before rerunning verification" in prompt
+
+
+def test_ralph_build_recovery_prompt_does_not_require_forbidden_main_py(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    run_dir = workspace / "ralph" / "ou_test" / "run-1"
+    project_dir = workspace / "project" / "todolist"
+    templates_dir = project_dir / "templates"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    templates_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "pyproject.toml").write_text(
+        '[project]\nname="todolist"\nversion="0.1.0"\n',
+        encoding="utf-8",
+    )
+    (project_dir / "app.py").write_text(
+        "from flask import Flask, render_template\n"
+        "app = Flask(__name__)\n"
+        "@app.route('/')\n"
+        "def index() -> str:\n"
+        "    return render_template('index.html')\n",
+        encoding="utf-8",
+    )
+    (templates_dir / "index.html").write_text("<h1>Todo List</h1>\n", encoding="utf-8")
+    (project_dir / "todos.json").write_text("[]\n", encoding="utf-8")
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(workspace), model="glm-5", streaming=False)
+
+    prompt = loop._ralph_build_recovery_prompt(
+        story={
+            "role": "engineer",
+            "title": "项目初始化与基础架构",
+            "acceptanceCriteria": [
+                f"输出目录: {project_dir}",
+                "必须包含文件: pyproject.toml、app.py、templates/index.html、todos.json",
+                "app.py 作为入口文件（不使用 main.py）",
+                "访问首页 / 返回 HTTP 200",
+                "Tests pass",
+                "Typecheck passes",
+            ],
+        },
+        run_dir=run_dir,
+        project_dir=project_dir,
+        latest_output=(
+            "Supervisor verification evidence:\n"
+            "tests/test_app.py:11: error: Function is missing a return type annotation  [no-untyped-def]"
+        ),
+        failure_reason="",
+        task_prompt="",
+    )
+
+    assert "Create the missing required artifact `main.py`" not in prompt
+    assert f"- {project_dir / 'main.py'}" not in prompt
+    assert f"\n- {project_dir}\n" not in prompt
 
 
 def test_ralph_targeted_story_hints_require_real_pytest_execution_when_tests_are_required(tmp_path: Path):
@@ -4814,7 +5861,7 @@ async def test_ralph_auto_finalizes_research_story_when_artifact_written_but_pro
         },
     )
 
-    await asyncio.wait_for(loop._ralph_run_loop("feishu", chat_id, run_dir), timeout=1)
+    await asyncio.wait_for(loop._ralph_run_loop("feishu", chat_id, run_dir), timeout=2)
 
     state = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
     story = json.loads(prd_path.read_text(encoding="utf-8"))["stories"][0]
@@ -4895,7 +5942,7 @@ async def test_ralph_auto_finalizes_docs_only_story_when_output_directory_receiv
         },
     )
 
-    await asyncio.wait_for(loop._ralph_run_loop("feishu", chat_id, run_dir), timeout=1)
+    await asyncio.wait_for(loop._ralph_run_loop("feishu", chat_id, run_dir), timeout=2)
 
     state = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
     story = json.loads(prd_path.read_text(encoding="utf-8"))["stories"][0]
@@ -5134,7 +6181,7 @@ async def test_ralph_auto_finalizes_hanging_engineer_story_once_artifacts_and_ty
         },
     )
 
-    await asyncio.wait_for(loop._ralph_run_loop("feishu", chat_id, run_dir), timeout=1)
+    await asyncio.wait_for(loop._ralph_run_loop("feishu", chat_id, run_dir), timeout=2)
 
     state = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
     story = json.loads(prd_path.read_text(encoding="utf-8"))["stories"][0]
@@ -5143,6 +6190,316 @@ async def test_ralph_auto_finalizes_hanging_engineer_story_once_artifacts_and_ty
     assert state["status"] == "done"
     assert story["passes"] is True
     assert "app/main.py" in progress or str(project_dir / "app" / "main.py") in progress
+
+
+@pytest.mark.asyncio
+async def test_ralph_prepares_typecheck_environment_before_first_prompt_and_autofinalizes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    bus = MessageBus()
+    channel = _FakeChannel()
+
+    run_id = "run-prep-before-prompt-1"
+    chat_id = "ou_test"
+    run_dir = workspace / "ralph" / chat_id / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    project_dir = workspace / "project" / "demo"
+    project_dir.mkdir(parents=True, exist_ok=True)
+
+    prd_path = run_dir / "prd.json"
+    progress_path = run_dir / "progress.txt"
+    progress_path.write_text("# Ralph Progress\n", encoding="utf-8")
+    prd_path.write_text(
+        json.dumps(
+            {
+                "stories": [
+                    {
+                        "id": "US-002",
+                        "title": "新增任务功能",
+                        "role": "engineer",
+                        "acceptanceCriteria": [
+                            "首页包含输入框和提交按钮",
+                            "提交表单到路由 POST /add",
+                            "任务写入 todos.json 文件",
+                            "Tests pass",
+                            "Typecheck passes",
+                        ],
+                        "passes": False,
+                    }
+                ]
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    async def _seed_before_prompt(self, project_dir: Path, story: dict) -> str:
+        (project_dir / "templates").mkdir(parents=True, exist_ok=True)
+        (project_dir / "tests").mkdir(parents=True, exist_ok=True)
+        (project_dir / "app.py").write_text(
+            "import json\n"
+            "from pathlib import Path\n"
+            "from typing import Any\n"
+            "from flask import Flask, redirect, render_template, request, url_for\n"
+            "app = Flask(__name__)\n"
+            "TODOS_FILE = Path(__file__).parent / 'todos.json'\n"
+            "def load_todos() -> list[dict[str, Any]]:\n"
+            "    if not TODOS_FILE.exists():\n"
+            "        return []\n"
+            "    with TODOS_FILE.open('r', encoding='utf-8') as f:\n"
+            "        data = json.load(f)\n"
+            "    return data if isinstance(data, list) else []\n"
+            "def save_todos(todos: list[dict[str, Any]]) -> None:\n"
+            "    with TODOS_FILE.open('w', encoding='utf-8') as f:\n"
+            "        json.dump(todos, f, ensure_ascii=False, indent=2)\n"
+            "@app.route('/')\n"
+            "def index() -> str:\n"
+            "    return render_template('index.html', todos=load_todos())\n"
+            "@app.route('/add', methods=['POST'])\n"
+            "def add_todo() -> Any:\n"
+            "    content = request.form.get('content', '').strip()\n"
+            "    if not content:\n"
+            "        return redirect(url_for('index'))\n"
+            "    todos = load_todos()\n"
+            "    todos.append({'id': len(todos) + 1, 'content': content, 'completed': False})\n"
+            "    save_todos(todos)\n"
+            "    return redirect(url_for('index'))\n",
+            encoding="utf-8",
+        )
+        (project_dir / "templates" / "index.html").write_text(
+            "<form action=\"/add\" method=\"POST\"><input name=\"content\"><button type=\"submit\">添加</button></form>\n"
+            "<ul>{% for todo in todos %}<li>{{ todo.get('content', '') }}</li>{% endfor %}</ul>\n",
+            encoding="utf-8",
+        )
+        (project_dir / "tests" / "test_app.py").write_text("def test_placeholder() -> None:\n    assert True\n", encoding="utf-8")
+        (project_dir / "todos.json").write_text("[]\n", encoding="utf-8")
+        venv_bin = project_dir / ".venv" / "bin"
+        venv_bin.mkdir(parents=True, exist_ok=True)
+        for name, output in (("mypy", "Success: no issues found in 1 source file"), ("pytest", ".\\n1 passed in 0.01s")):
+            bin_path = venv_bin / name
+            bin_path.write_text(f"#!/bin/sh\\necho '{output}'\\nexit 0\\n", encoding="utf-8")
+            bin_path.chmod(0o755)
+        return "seeded"
+
+    monkeypatch.setattr(AgentLoop, "_ralph_prepare_typecheck_environment", _seed_before_prompt)
+    monkeypatch.setattr(
+        AgentLoop,
+        "_ralph_collect_verification_evidence",
+        lambda self, project_dir, story: asyncio.sleep(0, result=""),
+    )
+    monkeypatch.setattr(
+        AgentLoop,
+        "_ralph_verification_passed",
+        lambda self, project_dir, story: asyncio.sleep(0, result=(project_dir / "app.py").exists()),
+    )
+
+    fake_client = _HangingRalphClient()
+    adapter = _FakeRalphAdapter(workspace, _FakeRalphStdio(fake_client))
+    loop = AgentLoop(
+        bus=bus,
+        adapter=adapter,
+        model="glm-5",
+        streaming=False,
+        channel_manager=_FakeChannelManager(channel),
+    )
+    loop._ralph_prompt_poll_seconds = 0.02
+    loop._ralph_artifact_watchdog_seconds = 0.05
+    loop._ralph_story_idle_watchdog_seconds = 0.2
+    loop._ralph_story_execution_watchdog_seconds = 0.2
+    loop._ralph_story_settle_timeout_seconds = 0.05
+    loop._get_ralph_stdio_adapter = lambda: asyncio.sleep(0, result=adapter._stdio)  # type: ignore[method-assign]
+
+    loop._ralph_set_current(chat_id, run_id)
+    loop._ralph_save_state(
+        run_dir,
+        {
+            "run_id": run_id,
+            "status": "approved",
+            "channel": "feishu",
+            "story_index": 0,
+            "pass_index": 0,
+            "project_dir": str(project_dir),
+        },
+    )
+
+    await asyncio.wait_for(loop._ralph_run_loop("feishu", chat_id, run_dir), timeout=2)
+
+    state = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+    story = json.loads(prd_path.read_text(encoding="utf-8"))["stories"][0]
+
+    assert state["status"] == "done"
+    assert story["passes"] is True
+    assert fake_client.create_session_calls == []
+
+
+@pytest.mark.asyncio
+async def test_ralph_run_loop_autofinalizes_recovery_when_project_is_already_green(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    bus = MessageBus()
+    channel = _FakeChannel()
+
+    run_id = "run-recovery-green-project"
+    chat_id = "ou_test"
+    run_dir = workspace / "ralph" / chat_id / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    project_dir = workspace / "project" / "demo"
+    project_dir.mkdir(parents=True, exist_ok=True)
+
+    prd_path = run_dir / "prd.json"
+    progress_path = run_dir / "progress.txt"
+    progress_path.write_text("# Ralph Progress\n", encoding="utf-8")
+    prd_path.write_text(
+        json.dumps(
+            {
+                "stories": [
+                    {
+                        "id": "US-001",
+                        "title": "项目初始化与基础架构",
+                        "role": "engineer",
+                        "acceptanceCriteria": [
+                            "必须包含文件: pyproject.toml、app.py、templates/index.html、todos.json",
+                            "app.py 作为入口文件（不使用 main.py）",
+                            "访问首页 / 返回 HTTP 200",
+                            "Tests pass",
+                            "Typecheck passes",
+                        ],
+                        "passes": False,
+                    }
+                ]
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    async def _write_valid_artifacts():
+        await asyncio.sleep(0.02)
+        (project_dir / "templates").mkdir(parents=True, exist_ok=True)
+        (project_dir / "tests").mkdir(parents=True, exist_ok=True)
+        (project_dir / "README.md").write_text("# Demo\n", encoding="utf-8")
+        (project_dir / "todos.json").write_text("[]\n", encoding="utf-8")
+        (project_dir / "templates" / "index.html").write_text("<h1>Todo</h1>\n", encoding="utf-8")
+        (project_dir / "app.py").write_text(
+            "from flask import Flask, render_template\n"
+            "from flask.typing import ResponseReturnValue\n\n"
+            "app = Flask(__name__)\n\n"
+            "@app.route('/')\n"
+            "def index() -> ResponseReturnValue:\n"
+            "    return render_template('index.html')\n",
+            encoding="utf-8",
+        )
+        (project_dir / "tests" / "test_app.py").write_text(
+            "from app import app\n\n"
+            "def test_index_returns_200() -> None:\n"
+            "    app.config['TESTING'] = True\n"
+            "    with app.test_client() as client:\n"
+            "        response = client.get('/')\n"
+            "    assert response.status_code == 200\n",
+            encoding="utf-8",
+        )
+        (project_dir / "pyproject.toml").write_text(
+            "[project]\n"
+            "name='demo'\n"
+            "version='0.1.0'\n"
+            "dependencies = [\n"
+            '    "flask>=3.0.0",\n'
+            "]\n\n"
+            "[project.optional-dependencies]\n"
+            "dev = [\n"
+            '    "pytest>=8.0.0",\n'
+            '    "mypy>=1.8.0",\n'
+            "]\n\n"
+            "[build-system]\n"
+            "requires=['hatchling']\n"
+            "build-backend='hatchling.build'\n",
+            encoding="utf-8",
+        )
+
+    fake_client = _HangingRalphClient(after_prompt=_write_valid_artifacts)
+    adapter = _FakeRalphAdapter(workspace, _FakeRalphStdio(fake_client))
+    loop = AgentLoop(
+        bus=bus,
+        adapter=adapter,
+        model="glm-5",
+        streaming=False,
+        channel_manager=_FakeChannelManager(channel),
+    )
+    loop._ralph_artifact_watchdog_seconds = 0.05
+    loop._ralph_prompt_poll_seconds = 0.01
+    loop._ralph_story_execution_watchdog_seconds = 10.0
+    loop._ralph_story_settle_timeout_seconds = 0.05
+
+    verification_calls = {"count": 0}
+
+    async def _verification_sequence(self, project_dir: Path, story: dict) -> bool:
+        verification_calls["count"] += 1
+        return verification_calls["count"] >= 2
+
+    recovery_called = {"count": 0}
+
+    async def _fake_retry(
+        self,
+        stdio,
+        run_dir,
+        project_dir,
+        story,
+        chat_id,
+        latest_output="",
+        failure_reason="",
+        task_prompt="",
+        prd_path=None,
+        progress_path=None,
+        story_index=None,
+    ):
+        recovery_called["count"] += 1
+        data = json.loads(prd_path.read_text(encoding="utf-8"))
+        data["stories"][story_index]["passes"] = True
+        prd_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        return ACPResponse(content="不应进入 recovery prompt", error=None)
+
+    monkeypatch.setattr(
+        AgentLoop,
+        "_ralph_prepare_typecheck_environment",
+        lambda self, project_dir, story: asyncio.sleep(0, result=""),
+    )
+    monkeypatch.setattr(AgentLoop, "_ralph_verification_passed", _verification_sequence)
+    monkeypatch.setattr(
+        AgentLoop,
+        "_ralph_collect_verification_evidence",
+        lambda self, project_dir, story: asyncio.sleep(0, result="transient verification failure"),
+    )
+    monkeypatch.setattr(AgentLoop, "_ralph_retry_incomplete_story", _fake_retry)
+
+    loop._ralph_set_current(chat_id, run_id)
+    loop._ralph_save_state(
+        run_dir,
+        {
+            "run_id": run_id,
+            "status": "approved",
+            "channel": "feishu",
+            "story_index": 0,
+            "pass_index": 0,
+            "project_dir": str(project_dir),
+        },
+    )
+
+    await asyncio.wait_for(loop._ralph_run_loop("feishu", chat_id, run_dir), timeout=1.5)
+
+    state = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+    story = json.loads(prd_path.read_text(encoding="utf-8"))["stories"][0]
+    progress = progress_path.read_text(encoding="utf-8")
+
+    assert state["status"] == "done"
+    assert story["passes"] is True
+    assert recovery_called["count"] == 0
+    assert "自动收口当前 story" in progress
 
 
 @pytest.mark.asyncio
@@ -5790,3 +7147,25 @@ def test_ralph_autofinalize_completion_guard_accepts_model_story_without_models_
         },
         project_dir,
     )
+
+
+def test_ralph_pick_final_summary_strips_internal_done_marker(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    progress_path = workspace / "progress.txt"
+    progress_path.parent.mkdir(parents=True, exist_ok=True)
+    progress_path.write_text("# Ralph Progress\n", encoding="utf-8")
+
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(workspace), model="glm-5", streaming=False)
+
+    summary = loop._ralph_pick_final_summary(
+        "## 2026-03-16 18:16:12 - US-003\n"
+        "- 检测到交付物已生成，Ralph 已自动收口当前 story。\n"
+        "---\n"
+        "[RALPH_DONE]\n",
+        "",
+        progress_path,
+        None,
+    )
+
+    assert "[RALPH_DONE]" not in summary
+    assert "自动收口当前 story" in summary

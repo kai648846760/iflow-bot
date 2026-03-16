@@ -65,3 +65,7 @@ progress.md
 task_plan.md
 chuiniu.md
 .ralph/
+.playwright-cli/
+feishu*.yml
+feishu*.png
+feishu*.txt

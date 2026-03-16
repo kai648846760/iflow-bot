@@ -674,12 +674,14 @@ These commands are sent inside your chat app (Telegram/Feishu/DingTalk/etc.):
    - Asks clarifying questions first when needed.
 2. `/ralph answer <text>`
    - Sends your clarification answers.
+   - Accepts either compact choices such as `1A 2B 3A` or normal free text.
    - The bot generates `prd.json` and a markdown PRD preview.
 3. Review the full PRD output in chat and the saved files.
 4. `/ralph approve`
    - Starts execution only after approval.
 5. `/ralph status`
    - Shows current run status, run id, current story/pass, story id, subagent role, and current phase.
+   - While running, the status includes the active subagent role and phase, for example `engineer` plus `executing` or `recovery`.
 6. `/ralph stop`
    - Stops the current run and cancels the active Ralph subagent session.
 7. `/ralph resume`
@@ -689,6 +691,8 @@ Ralph behavior:
 - Only one Ralph run can execute at a time in the same chat.
 - A gateway restart auto-resumes unfinished Ralph runs in that chat.
 - Ralph uses a dedicated stdio adapter so ordinary chat commands such as `/help` and `/status` remain available during execution.
+- Ordinary chat stays responsive while Ralph is running. In Feishu E2E, `/ralph status` and a normal chat message both received replies during execution.
+- Each run is persisted under `~/.iflow-bot/workspace/ralph/<chat_id>/<run_id>/`, and project files are written only to the output path required by the approved prompt.
 - PRD preview is split into multiple chat messages when needed instead of truncating the content.
 
 ### SkillHub CLI (for /skills)

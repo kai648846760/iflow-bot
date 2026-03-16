@@ -674,12 +674,14 @@ iflow-bot commands --help
    - 如有需要会先提出澄清问题。
 2. `/ralph answer <回复>`
    - 提交澄清问题答案。
+   - 支持 `1A 2B 3A` 这类紧凑回答，也支持直接输入自然语言答案。
    - 机器人会生成 `prd.json` 和 markdown 版 PRD。
 3. 先在聊天里审核完整 PRD 输出，必要时也可直接查看保存下来的文件。
 4. `/ralph approve`
    - 仅在审批通过后才正式开始执行。
 5. `/ralph status`
    - 展示当前状态、run id、当前 story/pass、story id、子角色、当前阶段。
+   - 运行中会明确显示当前子角色和阶段，例如 `工程` 与 `执行中`/`恢复中`。
 6. `/ralph stop`
    - 停止当前 run，并取消正在运行的 Ralph 子会话。
 7. `/ralph resume`
@@ -689,6 +691,8 @@ Ralph 行为说明：
 - 同一个聊天内同一时间只允许一个 Ralph run 执行。
 - Gateway 重启后，会自动继续该聊天中未完成的 Ralph run。
 - Ralph 使用独立的 stdio adapter，因此执行长任务时，`/help`、`/status` 这类普通命令仍可响应。
+- Ralph 执行期间主会话不会被锁死。Feishu 实际 E2E 中，`/ralph status` 和普通对话都能继续响应。
+- 每次 run 都会持久化到 `~/.iflow-bot/workspace/ralph/<chat_id>/<run_id>/`，项目文件只会写入 prompt 指定的输出目录。
 - PRD 预览过长时会自动分段发送，而不是直接截断。
 
 ## 🧰 SkillHub CLI（/skills 依赖）
