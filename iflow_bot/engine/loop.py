@@ -28,6 +28,7 @@ import random
 import re
 import shutil
 import time
+import tomllib
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
@@ -726,7 +727,10 @@ class AgentLoop:
             return True
 
         if cmd == "/language" and args:
-            lang = args[0]
+            lang = self._normalize_language_setting(args[0])
+            if not lang:
+                await self._send_command_reply(msg, self._msg("language_set_failed", error="unsupported language"))
+                return True
             settings_path = self.workspace / ".iflow" / "settings.json"
             try:
                 if settings_path.exists():
@@ -809,12 +813,23 @@ TOOLS.md - Your Tools（你的工具）定义了你可以使用的工具列表�
         if settings_path.exists():
             try:
                 data = json.loads(settings_path.read_text(encoding="utf-8"))
-                lang = (data.get("language") or "").strip()
+                lang = self._normalize_language_setting(data.get("language"))
                 if lang:
                     return lang
             except Exception:
                 pass
         return "zh-CN"
+
+    def _normalize_language_setting(self, lang: object) -> str:
+        value = str(lang or "").strip()
+        if not value:
+            return ""
+        lowered = value.lower()
+        if lowered.startswith("zh"):
+            return "zh-CN"
+        if lowered.startswith("en"):
+            return "en-US"
+        return ""
 
     def _format_language_policy(self, lang: str) -> str:
         key = (lang or "").lower()
@@ -2161,8 +2176,10 @@ policy: {policy}
             return adapter
 
         main_adapter = self.adapter
-        if getattr(main_adapter, "mode", None) != "stdio":
-            return await main_adapter._get_stdio_adapter()
+        if hasattr(main_adapter, "_get_stdio_adapter"):
+            adapter = await main_adapter._get_stdio_adapter()
+            self._ralph_stdio_adapter = adapter
+            return adapter
 
         from iflow_bot.engine.stdio_acp import StdioACPAdapter
 
@@ -2376,6 +2393,139 @@ policy: {policy}
                 stories[best_idx]["role"] = role
         return stories
 
+    def _ralph_is_flask_json_todo_prompt(self, prompt: str, qa_block: str = "") -> bool:
+        text = f"{prompt}\n{qa_block}".lower()
+        return all(token in text for token in ("todo", "flask", "json"))
+
+    def _ralph_is_default_simple_todo_prompt(self, prompt: str, qa_block: str = "") -> bool:
+        text = f"{prompt}\n{qa_block}".lower()
+        if "todo" not in text or "uv" not in text or "python" not in text:
+            return False
+
+        action_groups = (
+            ("新增", "添加", "add", "create"),
+            ("完成", "complete", "done"),
+            ("删除", "remove", "delete"),
+        )
+        if not all(any(token in text for token in group) for group in action_groups):
+            return False
+
+        conflicting_framework_tokens = (
+            "fastapi",
+            "django",
+            "starlette",
+            "quart",
+            "sanic",
+            "tornado",
+        )
+        if any(token in text for token in conflicting_framework_tokens):
+            return False
+
+        conflicting_storage_tokens = (
+            "sqlite",
+            "postgres",
+            "postgresql",
+            "mysql",
+            "mongodb",
+            "redis",
+        )
+        if any(token in text for token in conflicting_storage_tokens):
+            return False
+
+        return True
+
+    def _ralph_todo_output_dir(self, prompt: str, qa_block: str = "") -> str:
+        extracted = self._ralph_extract_project_dir(f"{prompt}\n{qa_block}")
+        return extracted or ""
+
+    def _ralph_concretize_flask_json_todo_story(
+        self,
+        story: dict,
+        idx: int,
+        output_dir: str = "",
+    ) -> dict:
+        normalized = self._ralph_normalize_story(story, idx)
+        title = str(normalized.get("title") or "").strip()
+        combined = f"{title}\n{normalized.get('description') or ''}".lower()
+        route_add = "/add"
+        route_complete = "/complete/<id>"
+        route_delete = "/delete/<id>"
+        if idx == 1 or any(token in combined for token in ("初始化", "基础架构", "bootstrap", "scaffold")):
+            criteria = []
+            if output_dir:
+                criteria.append(f"输出目录: {output_dir}")
+            criteria.extend(
+                [
+                    "必须包含文件: pyproject.toml、app.py、templates/index.html、todos.json",
+                    "app.py 作为入口文件（不使用 main.py）",
+                    "todos.json 初始化为空数组 []",
+                    "启动命令: uv run python app.py",
+                    "访问首页 / 返回 HTTP 200",
+                    "Tests pass",
+                    "Typecheck passes",
+                ]
+            )
+            normalized["title"] = "项目初始化与基础架构"
+            normalized["description"] = "作为工程师，我希望有一个正确初始化的项目结构，以便后续开发能够顺利进行。"
+            normalized["acceptanceCriteria"] = criteria
+            normalized["role"] = "engineer"
+            return normalized
+        if idx == 2 or any(token in combined for token in ("新增", "添加", "create", "add")):
+            normalized["title"] = "新增任务功能"
+            normalized["description"] = "作为用户，我希望能够添加新任务，以便记录我需要完成的事项。"
+            normalized["acceptanceCriteria"] = [
+                "首页包含输入框和提交按钮",
+                f"提交表单到路由 POST {route_add}",
+                "任务写入 todos.json 文件",
+                "刷新页面后仍能看到已添加的任务",
+                "空内容不可添加（前端或后端验证）",
+                "Tests pass",
+                "Typecheck passes",
+            ]
+            normalized["role"] = "engineer"
+            return normalized
+        if idx == 3 or any(token in combined for token in ("完成", "done", "complete")):
+            normalized["title"] = "完成任务功能"
+            normalized["description"] = "作为用户，我希望能够标记任务为已完成，以便追踪我的进度。"
+            normalized["acceptanceCriteria"] = [
+                "每个任务有完成按钮或复选框",
+                f"提交到路由 POST {route_complete}",
+                "completed 状态写回 todos.json",
+                "刷新页面后完成状态保持",
+                "已完成任务有明显视觉样式区分（如删除线或灰色）",
+                "Tests pass",
+                "Typecheck passes",
+            ]
+            normalized["role"] = "engineer"
+            return normalized
+        if idx == 4 or any(token in combined for token in ("删除", "remove", "delete")):
+            normalized["title"] = "删除任务功能"
+            normalized["description"] = "作为用户，我希望能够删除任务，以便清理不再需要的事项。"
+            normalized["acceptanceCriteria"] = [
+                "每个任务有删除按钮",
+                f"提交到路由 POST {route_delete}",
+                "页面上移除该任务",
+                "todos.json 中删除对应记录",
+                "刷新页面后删除的任务不再显示",
+                "Tests pass",
+                "Typecheck passes",
+            ]
+            normalized["role"] = "engineer"
+            return normalized
+        return normalized
+
+    def _ralph_canonical_flask_json_todo_stories(self, output_dir: str = "") -> list[dict]:
+        seeds = [
+            {"id": "US-001", "title": "项目初始化与基础架构", "description": "初始化项目", "role": "engineer"},
+            {"id": "US-002", "title": "新增任务功能", "description": "新增任务", "role": "engineer"},
+            {"id": "US-003", "title": "完成任务功能", "description": "完成任务", "role": "engineer"},
+            {"id": "US-004", "title": "删除任务功能", "description": "删除任务", "role": "engineer"},
+        ]
+        stories: list[dict] = []
+        for idx, seed in enumerate(seeds, start=1):
+            stories.append(self._ralph_concretize_flask_json_todo_story(seed, idx, output_dir=output_dir))
+        return stories
+
     def _ralph_apply_prompt_constraints_to_prd(
         self,
         prd: dict,
@@ -2387,6 +2537,15 @@ policy: {policy}
             return prd
 
         docs_only = self._ralph_requires_docs_only(prompt, qa_block)
+        output_dir = self._ralph_todo_output_dir(prompt, qa_block)
+        concrete_flask_todo = self._ralph_is_flask_json_todo_prompt(prompt, qa_block)
+        default_simple_todo = self._ralph_is_default_simple_todo_prompt(prompt, qa_block)
+        if (concrete_flask_todo or default_simple_todo) and not docs_only:
+            normalized_stories = self._ralph_canonical_flask_json_todo_stories(output_dir=output_dir)
+            prd["stories"] = normalized_stories
+            prd["userStories"] = normalized_stories
+            return prd
+
         normalized_stories: list[dict] = []
         for idx, story in enumerate(stories, start=1):
             if docs_only:
@@ -2435,10 +2594,55 @@ policy: {policy}
                     lines.append(f"   {key}. {options[key]}")
         return "\n".join(lines).strip()
 
+    def _ralph_expand_answer_choices(self, questions: list[dict], answers_text: str) -> str:
+        if not questions or not answers_text:
+            return ""
+
+        selections: list[str] = []
+        matches = re.findall(r"(?<!\w)(\d+)\s*([A-Za-z])(?!\w)", answers_text)
+        if not matches:
+            return ""
+
+        seen: set[tuple[int, str]] = set()
+        for q_idx_text, option_key_text in matches:
+            try:
+                q_idx = int(q_idx_text)
+            except ValueError:
+                continue
+            if q_idx < 1 or q_idx > len(questions):
+                continue
+            option_key = option_key_text.upper()
+            dedupe_key = (q_idx, option_key)
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            question = questions[q_idx - 1]
+            if not isinstance(question, dict):
+                continue
+            question_text = str(question.get("question") or "").strip()
+            options = question.get("options")
+            option_text = ""
+            if isinstance(options, dict):
+                option_text = str(options.get(option_key) or "").strip()
+            if not question_text or not option_text:
+                continue
+            selections.append(f"{q_idx}. {question_text} -> {option_key}. {option_text}")
+
+        return "\n".join(selections).strip()
+
     def _ralph_build_qa_block(self, questions: list[dict], answers_text: str) -> str:
         if not questions:
             return f"Answers:\n{answers_text}".strip()
         formatted = self._ralph_format_questions(questions)
+        expanded = self._ralph_expand_answer_choices(questions, answers_text)
+        if expanded:
+            return (
+                f"Questions:\n{formatted}\n\n"
+                "Authoritative selections:\n"
+                f"{expanded}\n\n"
+                "Answers:\n"
+                f"{answers_text}"
+            ).strip()
         return f"Questions:\n{formatted}\n\nAnswers:\n{answers_text}".strip()
 
     def _ralph_build_prd_preview(self, prd: dict) -> str:
@@ -2468,124 +2672,108 @@ policy: {policy}
             )
         return "\n".join(lines).strip()
 
+    def _ralph_render_story_sections(self, prd: dict, source_markdown: str = "") -> str:
+        stories = prd.get("stories") or prd.get("userStories") or []
+        is_en = self._is_english(self._load_language_setting())
+        use_bullet_style = "- **US-" in source_markdown
+        use_generic_story = "### 故事" in source_markdown or "### Story" in source_markdown
+        bullet_id_width = 3
+        bullet_id_match = re.search(r"-\s+\*\*US-(\d+)", source_markdown)
+        if bullet_id_match:
+            bullet_id_width = max(1, len(bullet_id_match.group(1)))
+        use_ascii_colon = any(
+            token in source_markdown
+            for token in ("**描述**:", "**角色**:", "**验收标准**:", "**Description**:", "**Role**:", "**Acceptance Criteria**:")
+        )
+        lines: list[str] = []
+        for idx, story in enumerate(stories, start=1):
+            if not isinstance(story, dict):
+                continue
+            story_id = str(story.get("id") or f"US-{idx:03d}").strip()
+            story_id_display = story_id
+            if use_bullet_style:
+                story_num_match = re.search(r"US-(\d+)", story_id, re.IGNORECASE)
+                if story_num_match:
+                    story_num = int(story_num_match.group(1))
+                    story_id_display = f"US-{story_num:0{bullet_id_width}d}"
+            title = str(story.get("title") or story.get("name") or f"Story {idx}").strip()
+            description = str(story.get("description") or "").strip()
+            role = str(story.get("role") or "").strip()
+            criteria = [
+                str(item).strip()
+                for item in story.get("acceptanceCriteria", []) or []
+                if str(item).strip()
+            ]
+            if role.lower() in {"researcher", "writer"}:
+                criteria = [
+                    item for item in criteria
+                    if "typecheck passes" not in item.lower() and "tests pass" not in item.lower()
+                ]
+
+            if use_bullet_style:
+                lines.append(f"- **{story_id_display}：{title}**")
+                if description:
+                    label = "**Description:**" if is_en else "**描述**："
+                    lines.append(f"  - {label} {description}" if is_en else f"  - {label}{description}")
+                if role:
+                    label = "**Role:**" if is_en else "**角色**："
+                    lines.append(f"  - {label} {role}" if is_en else f"  - {label}{role}")
+                label = "**Acceptance Criteria**:" if is_en else "**验收标准**："
+                lines.append(f"  - {label}")
+                for item in criteria:
+                    lines.append(f"    - {item}")
+            elif is_en:
+                if use_generic_story:
+                    lines.append(f"### Story {idx}: {title}")
+                else:
+                    lines.append(f"### User Story {idx}: {title}")
+                if description:
+                    lines.append("")
+                    desc_label = "**Description:**" if use_ascii_colon else "- **Description:**"
+                    lines.append(f"{desc_label} {description}")
+                if role:
+                    role_label = "**Role:**" if use_ascii_colon else "- **Role:**"
+                    lines.append(f"{role_label} {role}")
+                acc_label = "**Acceptance Criteria**:" if use_ascii_colon else "- **Acceptance Criteria**:"
+                lines.append(acc_label)
+                for item in criteria:
+                    lines.append(f"- {item}")
+            else:
+                if use_generic_story:
+                    lines.append(f"### 故事 {idx}：{title}" if not use_ascii_colon else f"### 故事 {idx}: {title}")
+                else:
+                    lines.append(f"### 用户故事 {idx}：{title}")
+                if description:
+                    lines.append("")
+                    desc_label = "**描述**:" if use_ascii_colon else "- **描述**："
+                    lines.append(f"{desc_label} {description}" if use_ascii_colon else f"{desc_label}{description}")
+                if role:
+                    role_label = "**角色**:" if use_ascii_colon else "- **角色**："
+                    lines.append(f"{role_label} {role}" if use_ascii_colon else f"{role_label}{role}")
+                acc_label = "**验收标准**:" if use_ascii_colon else "- **验收标准**："
+                lines.append(acc_label)
+                for item in criteria:
+                    lines.append(f"- {item}" if use_ascii_colon else f"  - {item}")
+            lines.append("")
+
+        return "\n".join(lines).strip()
+
     def _ralph_sanitize_prd_markdown(self, prd_md: str, prd: dict) -> str:
         stories = prd.get("stories") or prd.get("userStories") or []
         if not prd_md.strip() or not stories:
             return prd_md
+        rendered_stories = self._ralph_render_story_sections(prd, prd_md)
+        section_pattern = re.compile(
+            r"(^##\s+(?:用户故事|User Stories)\s*$)(.*?)(?=^##\s+|\Z)",
+            re.MULTILINE | re.DOTALL,
+        )
+        match = section_pattern.search(prd_md)
+        if not match:
+            return prd_md.strip()
 
-        ordered_story_meta: list[dict[str, object]] = []
-        for story in stories:
-            if not isinstance(story, dict):
-                continue
-            ordered_story_meta.append(
-                {
-                    "role": str(story.get("role") or "").strip().lower(),
-                    "description": str(story.get("description") or "").strip(),
-                    "acceptanceCriteria": [
-                        str(item).strip()
-                        for item in story.get("acceptanceCriteria", [])
-                        if str(item).strip()
-                    ],
-                }
-            )
-
-        story_heading = re.compile(r"^###\s+(?:User Story \d+[:：]|用户故事\s*\d+[:：])\s*(.+?)\s*$")
-        generic_story_heading = re.compile(r"^###\s+(?:故事|Story)\s*\d+[:：]\s*(.+?)\s*$")
-        bullet_story_heading = re.compile(r"^-\s+\*\*US-\d+[:：](.+?)\*\*\s*$")
-        lines = prd_md.splitlines()
-        sanitized: list[str] = []
-        story_cursor = -1
-        current_title = ""
-        current_role = ""
-        current_description = ""
-        current_criteria: list[str] = []
-        in_acceptance = False
-        for line in lines:
-            stripped = line.strip()
-            match = story_heading.match(stripped)
-            generic_match = generic_story_heading.match(stripped)
-            bullet_match = bullet_story_heading.match(stripped)
-            if match:
-                current_title = match.group(1).strip()
-                story_cursor += 1
-                meta = ordered_story_meta[story_cursor] if story_cursor < len(ordered_story_meta) else {}
-                current_role = str(meta.get("role") or "")
-                current_description = str(meta.get("description") or "")
-                current_criteria = list(meta.get("acceptanceCriteria") or [])
-                in_acceptance = False
-                sanitized.append(line)
-                continue
-            if generic_match:
-                current_title = generic_match.group(1).strip()
-                story_cursor += 1
-                meta = ordered_story_meta[story_cursor] if story_cursor < len(ordered_story_meta) else {}
-                current_role = str(meta.get("role") or "")
-                current_description = str(meta.get("description") or "")
-                current_criteria = list(meta.get("acceptanceCriteria") or [])
-                in_acceptance = False
-                sanitized.append(line)
-                continue
-            if bullet_match:
-                current_title = bullet_match.group(1).strip()
-                story_cursor += 1
-                meta = ordered_story_meta[story_cursor] if story_cursor < len(ordered_story_meta) else {}
-                current_role = str(meta.get("role") or "")
-                current_description = str(meta.get("description") or "")
-                current_criteria = list(meta.get("acceptanceCriteria") or [])
-                in_acceptance = False
-                sanitized.append(line)
-                continue
-            if (stripped.startswith("**描述**：") or stripped.startswith("**描述**:")) and current_description:
-                prefix = "**描述**：" if "：" in stripped else "**描述**: "
-                sanitized.append(f"{prefix}{current_description}")
-                continue
-            if stripped.startswith("- **Description:**") and current_description:
-                sanitized.append(f"- **Description:** {current_description}")
-                continue
-            if stripped.startswith("- **描述**：") and current_description:
-                sanitized.append(f"- **描述**：{current_description}")
-                continue
-            if stripped.startswith("**验收标准**") or stripped.startswith("**Acceptance Criteria**"):
-                in_acceptance = True
-                sanitized.append(line)
-                continue
-            if stripped.startswith("- **验收标准**") or stripped.startswith("- **Acceptance Criteria**"):
-                in_acceptance = True
-                sanitized.append(line)
-                continue
-            if (stripped.startswith("**角色**：") or stripped.startswith("**角色**:")) and current_role:
-                prefix = "**角色**：" if "：" in stripped else "**角色**: "
-                sanitized.append(f"{prefix}{current_role}")
-                continue
-            if stripped.startswith("- **Role:**") and current_role:
-                sanitized.append(f"- **Role:** {current_role}")
-                continue
-            if stripped.startswith("- **角色**：") and current_role:
-                sanitized.append(f"- **角色**：{current_role}")
-                continue
-            if in_acceptance and stripped.startswith("### "):
-                in_acceptance = False
-                current_criteria = []
-            if in_acceptance and bullet_story_heading.match(stripped):
-                in_acceptance = False
-                current_criteria = []
-            if in_acceptance and stripped.startswith("- "):
-                item_text = stripped[2:].strip()
-                if current_criteria:
-                    if item_text in current_criteria:
-                        sanitized.append(line)
-                    continue
-                if current_role in {"researcher", "writer"}:
-                    lowered = item_text.lower()
-                    if (
-                        lowered in {"typecheck passes", "tests pass"}
-                        or "typecheck passes" in lowered
-                        or "tests pass" in lowered
-                    ):
-                        continue
-            sanitized.append(line)
-
-        return "\n".join(sanitized).strip()
+        replacement = f"{match.group(1)}\n\n{rendered_stories}\n"
+        sanitized = section_pattern.sub(replacement, prd_md, count=1)
+        return sanitized.strip()
 
     def _ralph_build_prd_ready_content(
         self,
@@ -2638,6 +2826,30 @@ policy: {policy}
                 "编写代码",
                 "初始化",
                 "启动服务",
+                "add",
+                "list",
+                "show",
+                "display",
+                "render",
+                "save",
+                "persist",
+                "submit",
+                "toggle",
+                "mark",
+                "delete",
+                "remove",
+                "新增",
+                "添加",
+                "查看",
+                "显示",
+                "展示",
+                "渲染",
+                "保存",
+                "持久化",
+                "提交",
+                "切换",
+                "标记",
+                "删除",
             )
             implementation_targets = (
                 "api",
@@ -2662,6 +2874,25 @@ policy: {policy}
                 "单元测试",
                 "集成测试",
                 "服务",
+                "page",
+                "form",
+                "button",
+                "template",
+                "html",
+                "jinja",
+                "root path",
+                "sqlite",
+                "task list",
+                "todo",
+                "page refresh",
+                "页面",
+                "表单",
+                "按钮",
+                "模板",
+                "根路径",
+                "sqlite 数据库",
+                "任务列表",
+                "任务",
             )
             documentation_signals = (
                 "文档",
@@ -2685,7 +2916,6 @@ policy: {policy}
                 "可行性",
                 "依据",
                 "对比",
-                "记录",
             )
             if role in {"researcher", "writer"}:
                 has_impl_action = any(signal in combined for signal in implementation_actions)
@@ -2744,21 +2974,104 @@ policy: {policy}
         criteria = [str(item).strip() for item in story.get("acceptanceCriteria", []) if str(item).strip()]
         return any("tests pass" in item.lower() for item in criteria)
 
+    def _ralph_single_file_hatchling_includes(self, project_dir: Path) -> list[str]:
+        includes: list[str] = []
+        for filename in ("app.py", "main.py", "README.md", "todos.json"):
+            if (project_dir / filename).is_file():
+                includes.append(filename)
+        for dirname in ("templates", "static"):
+            if (project_dir / dirname).is_dir():
+                includes.append(f"{dirname}/**")
+        return includes
+
+    def _ralph_rewrite_hatchling_wheel_target(self, pyproject_text: str, target_block: str) -> str:
+        wheel_pattern = re.compile(
+            r"(?ms)^\[tool\.hatch\.build\.targets\.wheel\]\n.*?(?=^\[|\Z)"
+        )
+        if wheel_pattern.search(pyproject_text):
+            return wheel_pattern.sub(target_block.rstrip() + "\n\n", pyproject_text, count=1).rstrip() + "\n"
+        return pyproject_text.rstrip() + f"\n\n{target_block.rstrip()}\n"
+
     def _ralph_ensure_hatchling_wheel_packages(self, project_dir: Path) -> bool:
         pyproject_path = project_dir / "pyproject.toml"
         app_dir = project_dir / "app"
-        if not pyproject_path.exists() or not app_dir.is_dir():
+        if not pyproject_path.exists():
             return False
         try:
             pyproject_text = pyproject_path.read_text(encoding="utf-8")
         except Exception:
             return False
-        if "[tool.hatch.build.targets.wheel]" in pyproject_text:
-            return False
         build_backend_match = re.search(r'build-backend\s*=\s*["\']hatchling\.build["\']', pyproject_text)
         if not build_backend_match:
             return False
-        patched = pyproject_text.rstrip() + '\n\n[tool.hatch.build.targets.wheel]\npackages = ["app"]\n'
+        wheel_config = ""
+        if app_dir.is_dir():
+            wheel_config = '[tool.hatch.build.targets.wheel]\npackages = ["app"]\n'
+        else:
+            includes = self._ralph_single_file_hatchling_includes(project_dir)
+            if not includes:
+                return False
+            include_lines = ", ".join(f'"{item}"' for item in includes)
+            wheel_config = f"[tool.hatch.build.targets.wheel]\ninclude = [{include_lines}]\n"
+        existing_wheel_match = re.search(
+            r"(?ms)^\[tool\.hatch\.build\.targets\.wheel\]\n(?P<body>.*?)(?=^\[|\Z)",
+            pyproject_text,
+        )
+        if existing_wheel_match:
+            existing_body = existing_wheel_match.group("body")
+            desired_body = wheel_config.split("\n", 1)[1].strip()
+            if existing_body.strip() == desired_body:
+                return False
+        patched = self._ralph_rewrite_hatchling_wheel_target(pyproject_text, wheel_config)
+        try:
+            pyproject_path.write_text(patched, encoding="utf-8")
+        except Exception:
+            return False
+        return True
+
+    def _ralph_ensure_python_multipart_dependency(self, project_dir: Path) -> bool:
+        pyproject_path = project_dir / "pyproject.toml"
+        if not pyproject_path.is_file():
+            return False
+        try:
+            pyproject_text = pyproject_path.read_text(encoding="utf-8")
+        except Exception:
+            return False
+        if "python-multipart" in pyproject_text:
+            return False
+
+        form_detected = False
+        for path in project_dir.rglob("*.py"):
+            if self._ralph_should_ignore_artifact(path, project_dir):
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except Exception:
+                continue
+            if "Form(" not in text:
+                continue
+            if "from fastapi import" in text or "fastapi import Form" in text:
+                form_detected = True
+                break
+        if not form_detected:
+            return False
+
+        deps_match = re.search(
+            r"(?ms)^dependencies\s*=\s*\[(?P<body>.*?)^\]",
+            pyproject_text,
+        )
+        if not deps_match:
+            return False
+        body = deps_match.group("body")
+        if body.strip():
+            insertion = body.rstrip() + '\n    "python-multipart>=0.0.20",\n'
+        else:
+            insertion = '\n    "python-multipart>=0.0.20",\n'
+        patched = (
+            pyproject_text[: deps_match.start("body")]
+            + insertion
+            + pyproject_text[deps_match.end("body") :]
+        )
         try:
             pyproject_path.write_text(patched, encoding="utf-8")
         except Exception:
@@ -2773,7 +3086,16 @@ policy: {policy}
 
         notes: list[str] = []
         if self._ralph_ensure_hatchling_wheel_packages(project_dir):
-            notes.append("Patched pyproject.toml with [tool.hatch.build.targets.wheel] packages = [\"app\"]")
+            try:
+                pyproject_text = (project_dir / "pyproject.toml").read_text(encoding="utf-8")
+            except Exception:
+                pyproject_text = ""
+            if 'packages = ["app"]' in pyproject_text:
+                notes.append("Patched pyproject.toml with [tool.hatch.build.targets.wheel] packages = [\"app\"]")
+            elif "[tool.hatch.build.targets.wheel]" in pyproject_text:
+                notes.append("Patched pyproject.toml with [tool.hatch.build.targets.wheel] include = [...] for a single-file app project")
+        if self._ralph_ensure_python_multipart_dependency(project_dir):
+            notes.append('Patched pyproject.toml with "python-multipart" for FastAPI form handling')
 
         sync_commands = [
             ["uv", "sync", "--extra", "dev"],
@@ -2855,11 +3177,7 @@ policy: {policy}
         success_evidence: list[str] = []
 
         if self._ralph_story_requires_typecheck(story):
-            typecheck_commands: list[list[str]] = []
-            venv_mypy = project_dir / ".venv" / "bin" / "mypy"
-            if venv_mypy.is_file():
-                typecheck_commands.append([str(venv_mypy), target])
-            typecheck_commands.append(["uv", "run", "--no-project", "mypy", target])
+            typecheck_commands = self._ralph_verification_commands(project_dir, "mypy", target)
             ok, evidence = await _collect_group(typecheck_commands)
             if ok is False:
                 return evidence
@@ -2867,11 +3185,7 @@ policy: {policy}
                 success_evidence.append(evidence)
 
         if self._ralph_story_requires_tests(story):
-            test_commands: list[list[str]] = []
-            venv_pytest = project_dir / ".venv" / "bin" / "pytest"
-            if venv_pytest.is_file():
-                test_commands.append([str(venv_pytest), "-q"])
-            test_commands.append(["uv", "run", "--no-project", "pytest", "-q"])
+            test_commands = self._ralph_verification_commands(project_dir, "pytest", "-q")
             ok, evidence = await _collect_group(test_commands)
             if ok is False:
                 return evidence
@@ -2915,20 +3229,12 @@ policy: {policy}
             return False
 
         if require_typecheck:
-            typecheck_commands: list[list[str]] = []
-            venv_mypy = project_dir / ".venv" / "bin" / "mypy"
-            if venv_mypy.is_file():
-                typecheck_commands.append([str(venv_mypy), target])
-            typecheck_commands.append(["uv", "run", "--no-project", "mypy", target])
+            typecheck_commands = self._ralph_verification_commands(project_dir, "mypy", target)
             if not await _group_passes(typecheck_commands):
                 return False
 
         if require_tests:
-            test_commands: list[list[str]] = []
-            venv_pytest = project_dir / ".venv" / "bin" / "pytest"
-            if venv_pytest.is_file():
-                test_commands.append([str(venv_pytest), "-q"])
-            test_commands.append(["uv", "run", "--no-project", "pytest", "-q"])
+            test_commands = self._ralph_verification_commands(project_dir, "pytest", "-q")
             if not await _group_passes(test_commands):
                 return False
 
@@ -2946,6 +3252,59 @@ policy: {policy}
             "questions.json",
             "revision_feedback.txt",
         }
+
+    def _ralph_iter_artifact_files(self, path: Path, base: Path | None = None):
+        anchor = base or path.parent
+        try:
+            if not path.exists():
+                return
+            if path.is_file():
+                if not self._ralph_should_ignore_artifact(path, anchor):
+                    yield path
+                return
+            if path.name in self._ralph_control_roots():
+                return
+            for root, dirs, files in os.walk(path, topdown=True):
+                root_path = Path(root)
+                dirs[:] = [
+                    name
+                    for name in sorted(dirs)
+                    if name not in self._ralph_control_roots()
+                ]
+                for name in sorted(files):
+                    child = root_path / name
+                    if self._ralph_should_ignore_artifact(child, path):
+                        continue
+                    yield child
+        except Exception:
+            return
+
+    def _ralph_uv_project_has_extra(self, project_dir: Path, extra_name: str) -> bool:
+        pyproject_path = project_dir / "pyproject.toml"
+        if not pyproject_path.is_file():
+            return False
+        try:
+            data = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+        except Exception:
+            return False
+        project = data.get("project")
+        if not isinstance(project, dict):
+            return False
+        optional_dependencies = project.get("optional-dependencies")
+        if not isinstance(optional_dependencies, dict):
+            return False
+        extra = optional_dependencies.get(extra_name)
+        return isinstance(extra, list) and bool(extra)
+
+    def _ralph_verification_commands(self, project_dir: Path, tool: str, *args: str) -> list[list[str]]:
+        commands: list[list[str]] = []
+        venv_tool = project_dir / ".venv" / "bin" / tool
+        if venv_tool.is_file():
+            commands.append([str(venv_tool), *args])
+        if self._ralph_uv_project_has_extra(project_dir, "dev"):
+            commands.append(["uv", "run", "--extra", "dev", tool, *args])
+        commands.append(["uv", "run", "--with", tool, "--no-project", tool, *args])
+        return commands
 
     def _ralph_should_ignore_artifact(self, path: Path, base: Path | None = None) -> bool:
         try:
@@ -2965,10 +3324,8 @@ policy: {policy}
                 if not path.exists():
                     continue
                 if path.is_dir():
-                    for child in sorted(path.rglob("*")):
-                        if not child.is_file() or child.stat().st_size <= 0:
-                            continue
-                        if self._ralph_should_ignore_artifact(child, path):
+                    for child in self._ralph_iter_artifact_files(path, path):
+                        if child.stat().st_size <= 0:
                             continue
                         materialized.append(child)
                     continue
@@ -2996,16 +3353,12 @@ policy: {policy}
             return synced
 
         project_dir.mkdir(parents=True, exist_ok=True)
-        for path in sorted(run_dir.rglob("*")):
-            if not path.is_file():
-                continue
+        for path in self._ralph_iter_artifact_files(run_dir, run_dir):
             try:
                 rel = path.relative_to(run_dir)
             except Exception:
                 continue
             if not rel.parts:
-                continue
-            if self._ralph_should_ignore_artifact(path, run_dir):
                 continue
             dest = project_dir / rel
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -3050,6 +3403,22 @@ policy: {policy}
         if context_block:
             context_block = f"{context_block}\n"
         project_tree = self._ralph_project_tree_summary(project_dir)
+        missing_explicit_artifacts = self._ralph_missing_explicit_artifact_paths(story, project_dir)
+        missing_artifact_block = ""
+        if missing_explicit_artifacts:
+            rendered_missing: list[str] = []
+            for path in missing_explicit_artifacts:
+                try:
+                    rendered_missing.append(str(path.relative_to(project_dir)))
+                except Exception:
+                    rendered_missing.append(str(path))
+            missing_artifact_lines = "\n".join(f"- {item}" for item in rendered_missing[:8])
+            missing_artifact_block = (
+                "Missing required artifacts right now:\n"
+                f"{missing_artifact_lines}\n"
+                "Create every missing required artifact before rerunning verification.\n"
+                "Do not stop after only updating README, dependency files, cache files, or other incidental scaffolding while these artifacts are still missing.\n"
+            )
         targeted_hints = self._ralph_targeted_recovery_hints(
             story=story,
             project_dir=project_dir,
@@ -3073,7 +3442,8 @@ policy: {policy}
         packaging_hint = self._ralph_python_packaging_hint(project_dir)
         verification_guidance = (
             "Verification guidance:\n"
-            "- If `uv run <tool>` triggers editable build or package selection failures, rerun with `uv run --no-project <tool>` or the existing virtualenv tool binary.\n"
+            "- Prefer the project dev extra when it exists: `uv run --extra dev <tool> ...`.\n"
+            "- If the project does not expose a dev extra, rerun with `uv run --no-project <tool> ...`, `uv run --with <tool> --no-project <tool> ...`, or the existing virtualenv tool binary.\n"
             "- If typecheck or tests fail because imports/dependencies are missing, install or sync the required dependencies first, then rerun verification until it passes.\n"
             "- Do not stop at reporting a verification failure; fix it, rerun it, then update prd.json and progress.txt.\n"
         )
@@ -3098,6 +3468,7 @@ policy: {policy}
             f"{story_block}\n"
             "Current project directory snapshot:\n"
             f"{project_tree}\n"
+            f"{missing_artifact_block}"
             f"{targeted_hints}"
             f"{completion_guard}"
             f"{source_policy}"
@@ -3119,8 +3490,10 @@ policy: {policy}
                 if matches:
                     return matches[0].strip()
             title = str(story.get("title") or "").strip()
-            if title:
-                return title
+            for block in [title, str(story.get("description") or "").strip()]:
+                slash_match = re.search(r"(/[\w:-]+)", block)
+                if slash_match:
+                    return slash_match.group(1).strip()
         return ""
 
     def _ralph_targeted_story_hints(self, story: dict, project_dir: Path, latest_output: str = "") -> str:
@@ -3129,11 +3502,14 @@ policy: {policy}
         command_tokens = [token for token in re.findall(r"[A-Za-z0-9_]+", f"{title} {command_phrase}".lower()) if token]
         criteria_text = "\n".join(str(item) for item in (story.get("acceptanceCriteria") or []))
         combined_text = f"{title}\n{criteria_text}".lower()
+        requires_app_py_only = "app.py 作为入口文件" in combined_text and "不使用 main.py" in combined_text
         lowered_output = latest_output.lower()
         pyproject_path = project_dir / "pyproject.toml"
+        explicit_artifact_paths = self._ralph_extract_explicit_artifact_paths(story, project_dir)
         pyproject_text = ""
         with contextlib.suppress(Exception):
             pyproject_text = pyproject_path.read_text(encoding="utf-8")
+        tests_dir = project_dir / "tests"
         is_scaffold_story = any(
             token in combined_text
             for token in ("脚手架", "初始化", "scaffold", "bootstrap", "uv init", "health")
@@ -3142,6 +3518,12 @@ policy: {policy}
         source_candidates: list[Path] = []
         if is_scaffold_story and pyproject_path.exists():
             source_candidates.append(pyproject_path)
+        root_entry = project_dir / "app.py"
+        root_main = project_dir / "main.py"
+        if is_scaffold_story and root_entry.exists():
+            source_candidates.append(root_entry)
+        if is_scaffold_story and root_main.exists():
+            source_candidates.append(root_main)
         app_main = project_dir / "app" / "main.py"
         if is_scaffold_story and (app_main.exists() or (project_dir / "app").is_dir()):
             source_candidates.append(app_main if app_main.exists() else project_dir / "app")
@@ -3165,17 +3547,19 @@ policy: {policy}
                     source_candidates.insert(0, candidate)
                     break
 
-        mypy_path = ""
-        mypy_message = ""
-        mypy_fix_hint = ""
-        mypy_match = re.search(
+        mypy_failures: list[tuple[str, str]] = []
+        mypy_fix_hints: list[str] = []
+        mypy_matches = list(
+            re.finditer(
             r"(?P<path>[A-Za-z0-9_./-]+\.py):(?P<line>\d+):\s*error:\s*(?P<message>.+?)(?:\s+\[[^\]]+\])?\s*$",
             latest_output,
             re.IGNORECASE | re.MULTILINE,
         )
-        if mypy_match:
+        )
+        for mypy_match in mypy_matches[:5]:
             mypy_path = f"{mypy_match.group('path')}:{mypy_match.group('line')}"
             mypy_message = mypy_match.group("message").strip()
+            mypy_failures.append((mypy_path, mypy_message))
             mypy_rel = Path(mypy_match.group("path"))
             for candidate in (project_dir / mypy_rel, project_dir / "src" / mypy_rel, project_dir / "app" / mypy_rel):
                 if candidate.exists():
@@ -3183,20 +3567,100 @@ policy: {policy}
                     break
             lowered_mypy = mypy_message.lower()
             if "missing a return type annotation" in lowered_mypy:
-                mypy_fix_hint = "Add an explicit return type annotation to the flagged function."
+                mypy_fix_hints.append("Add an explicit return type annotation to the flagged function.")
             elif "missing type parameters" in lowered_mypy:
-                mypy_fix_hint = "Add the missing generic type parameters instead of leaving the container type implicit."
+                mypy_fix_hints.append("Add the missing generic type parameters instead of leaving the container type implicit.")
+            elif (
+                "incompatible return value type" in lowered_mypy
+                and "got \"response\"" in lowered_mypy
+                and ("expected \"str\"" in lowered_mypy or "expected \"tuple[str, int]\"" in lowered_mypy)
+            ):
+                mypy_fix_hints.append(
+                    "For Flask routes that return `redirect(...)` or `render_template(...)`, annotate the handler with `ResponseReturnValue` from `flask.typing` instead of `str`."
+                )
+            elif (
+                "incompatible return value type" in lowered_mypy
+                and "tuple[response, int]" in lowered_mypy
+                and "tuple[str, int]" in lowered_mypy
+            ):
+                mypy_fix_hints.append(
+                    "For Flask routes that return `jsonify(...)` with a status code, replace the overly narrow `tuple[str, int]` annotation with `ResponseReturnValue` from `flask.typing` or another response-compatible type."
+                )
+            elif "return type of a generator function should be \"generator\"" in lowered_mypy:
+                mypy_fix_hints.append(
+                    "For pytest fixtures or other `yield`-based helpers, annotate the function as `Generator[T, None, None]` or `Iterator[T]` instead of the yielded item type."
+                )
+            elif "returning any from function declared to return" in lowered_mypy:
+                mypy_fix_hints.append(
+                    "If the value comes from `json.load(...)` or another untyped API, validate or normalize it first, or use an explicit `cast(...)` to the declared return type before returning it."
+                )
+            elif (
+                "value of type \"any | none\" is not indexable" in lowered_mypy
+                or "value of type 'any | none' is not indexable" in lowered_mypy
+            ):
+                mypy_fix_hints.append(
+                    "For Flask test responses, do not index `response.json` directly. Use `payload = response.get_json()`, assert `payload is not None`, then index the narrowed payload."
+                )
+            elif (
+                "no overload variant of \"int\" matches argument type \"object\"" in lowered_mypy
+                or "no overload variant of 'int' matches argument type 'object'" in lowered_mypy
+            ):
+                mypy_fix_hints.append(
+                    "Narrow the `object` value with `isinstance(...)` or equivalent validation before passing it to `int()`, instead of converting an untyped dictionary value directly."
+                )
             elif "incompatible return value type" in lowered_mypy:
-                mypy_fix_hint = "Make the function return value match its declared return type, or update the annotation to the correct type."
+                mypy_fix_hints.append(
+                    "Make the function return value match its declared return type, or update the annotation to the correct type."
+                )
+            elif (
+                "argument \"id\" to \"task\" has incompatible type \"int | none\"" in lowered_mypy
+                or "expected \"int\"" in lowered_mypy and "task" in lowered_mypy and "\"int | none\"" in lowered_mypy
+            ):
+                mypy_fix_hints.append(
+                    "Treat `cursor.lastrowid` as optional: guard against `None`, then convert it to `int` before constructing `Task`."
+                )
             elif "incompatible types in assignment" in lowered_mypy:
-                mypy_fix_hint = "Align the assigned value type with the variable annotation instead of relying on implicit coercion."
+                mypy_fix_hints.append("Align the assigned value type with the variable annotation instead of relying on implicit coercion.")
             else:
-                mypy_fix_hint = "Fix the reported type error in the flagged file before rerunning the full verification."
+                mypy_fix_hints.append("Fix the reported type error in the flagged file before rerunning the full verification.")
 
-        missing_modules = {match.lower() for match in re.findall(r"No module named ([A-Za-z0-9_.-]+)", latest_output, re.IGNORECASE)}
+        missing_modules = {
+            match.lower()
+            for match in re.findall(r"No module named ['\"]?([A-Za-z0-9_.-]+)['\"]?", latest_output, re.IGNORECASE)
+        }
         if "starlette.testclient module requires the httpx package" in lowered_output:
             missing_modules.add("httpx")
+        test_import_path = ""
+        test_import_match = re.search(
+            r"ImportError while importing test module ['\"]?(?P<path>[^'\"]+test[^'\"]+\.py)['\"]?",
+            latest_output,
+            re.IGNORECASE,
+        )
+        if test_import_match:
+            raw_test_path = test_import_match.group("path").strip()
+            test_marker = "tests/"
+            if test_marker in raw_test_path:
+                test_import_path = raw_test_path[raw_test_path.index(test_marker):]
+            else:
+                test_import_path = raw_test_path
+            candidate = project_dir / Path(test_import_path)
+            if candidate.exists():
+                source_candidates.insert(0, candidate)
         dependency_hints: list[str] = []
+        validation_hints: list[str] = []
+        missing_explicit_artifacts: list[Path] = []
+        project_dir_resolved: Path | None = None
+        with contextlib.suppress(Exception):
+            project_dir_resolved = project_dir.resolve()
+        for artifact_path in explicit_artifact_paths:
+            resolved_artifact = artifact_path
+            with contextlib.suppress(Exception):
+                resolved_artifact = artifact_path.resolve()
+            if project_dir_resolved is not None and resolved_artifact == project_dir_resolved:
+                continue
+            if artifact_path.exists():
+                continue
+            missing_explicit_artifacts.append(artifact_path)
         if "pytest" in missing_modules or "mypy" in missing_modules:
             dependency_hints.append(
                 "Install the missing dev tools in the project environment, then run `uv sync --extra dev` before rerunning verification."
@@ -3208,7 +3672,25 @@ policy: {policy}
             or "tests/" in lowered_output
             or "test_" in lowered_output
         )
+        local_missing_modules: set[str] = set()
         for module in sorted(missing_modules):
+            module_path = Path(*module.split("."))
+            local_candidates = [
+                project_dir / module_path.with_suffix(".py"),
+                project_dir / module_path / "__init__.py",
+                project_dir / "src" / module_path.with_suffix(".py"),
+                project_dir / "src" / module_path / "__init__.py",
+                project_dir / "app" / module_path.with_suffix(".py"),
+                project_dir / "app" / module_path / "__init__.py",
+            ]
+            local_candidate = next((candidate for candidate in local_candidates if candidate.exists()), None)
+            if local_candidate is not None:
+                local_missing_modules.add(module)
+                source_candidates.insert(0, local_candidate)
+                validation_hints.append(
+                    f"Make `{module}` importable under pytest: either move the code into an importable package and update the test import, or add `[tool.pytest.ini_options] pythonpath = [\".\"]` so pytest can resolve the project root."
+                )
+                continue
             if module in {"pytest", "mypy"} or module in declared_lower:
                 continue
             if is_test_context or module == "httpx":
@@ -3221,7 +3703,12 @@ policy: {policy}
                 )
         if is_scaffold_story:
             missing_runtime: list[str] = []
-            for package in ("fastapi", "jinja2"):
+            scaffold_runtime_packages: list[str] = []
+            if "fastapi" in combined_text or "fastapi" in declared_lower:
+                scaffold_runtime_packages.extend(["fastapi", "jinja2"])
+            elif "flask" in combined_text or "flask" in declared_lower:
+                scaffold_runtime_packages.append("flask")
+            for package in scaffold_runtime_packages:
                 if package not in declared_lower:
                     missing_runtime.append(package)
             if missing_runtime:
@@ -3234,6 +3721,49 @@ policy: {policy}
                     "Ensure `pytest` and `mypy` are declared as dev dependencies in `pyproject.toml` so verification commands can run."
                 )
 
+        whitespace_validation_detected = any(
+            signal in lowered_output
+            for signal in (
+                "whitespace_only_title",
+                "strip_whitespace",
+                "assert 201 == 422",
+                "pydanticdeprecatedsince20",
+            )
+        )
+        if whitespace_validation_detected:
+            validation_hints.append(
+                "Reject whitespace-only titles after stripping whitespace so the API returns `422` instead of accepting blank input."
+            )
+            validation_hints.append(
+                "Do not rely on deprecated Pydantic v2 field extras for trimming; use a validator or equivalent normalization that trims first and then enforces non-empty content."
+            )
+        if "readme file does not exist" in lowered_output or "readme.md" in lowered_output and "oserror" in lowered_output:
+            validation_hints.append(
+                "Fix the packaging metadata before rerunning tests: create the missing `README.md` file or update `pyproject.toml` so its `readme` field points to an existing file."
+            )
+        if test_import_path:
+            validation_hints.append(
+                f"Re-run the focused import failure after fixing the module path: `pytest -q {test_import_path}`."
+            )
+
+        verification_requirement_hints: list[str] = []
+        if self._ralph_story_requires_tests(story):
+            verification_requirement_hints.append(
+                "This story is not complete until at least one real pytest test file exists and `pytest -q` exits with status 0."
+            )
+            if not tests_dir.is_dir() or not any(tests_dir.rglob("test*.py")):
+                verification_requirement_hints.append(
+                    "Create or update tests under `tests/` (for example `tests/test_<feature>.py`) before you stop."
+                )
+            if "no tests ran" in lowered_output:
+                verification_requirement_hints.append(
+                    "`pytest -q` returning `no tests ran` is a failure for this story; add or fix tests until pytest actually executes and passes."
+                )
+        if self._ralph_story_requires_typecheck(story):
+            verification_requirement_hints.append(
+                "This story is not complete until the required mypy run exits with status 0 after your changes."
+            )
+
         deduped_sources: list[Path] = []
         seen_sources: set[str] = set()
         for candidate in source_candidates:
@@ -3245,7 +3775,6 @@ policy: {policy}
         source_candidates = deduped_sources
 
         related_tests: list[Path] = []
-        tests_dir = project_dir / "tests"
         if tests_dir.is_dir():
             for candidate in sorted(tests_dir.rglob("test*.py")):
                 stem = candidate.stem.lower()
@@ -3267,7 +3796,46 @@ policy: {policy}
                 deduped_tests.append(candidate)
             related_tests = deduped_tests[:3]
 
-        if not source_candidates and not related_tests and not symbol and not mypy_path and not dependency_hints:
+        explicit_routes = [
+            route.lower()
+            for route in re.findall(r"(?<![A-Za-z0-9_.-])(/[\w/<>{}:.-]+)", combined_text)
+            if route and not route.startswith("//")
+        ]
+        if explicit_routes:
+            for candidate in (project_dir / "app.py", project_dir / "main.py", project_dir / "templates" / "index.html"):
+                if candidate.exists():
+                    source_candidates.insert(0, candidate)
+            if tests_dir.is_dir():
+                for candidate in sorted(tests_dir.rglob("test*.py")):
+                    related_tests.append(candidate)
+            deduped_sources = []
+            seen_sources = set()
+            for candidate in source_candidates:
+                key = str(candidate)
+                if key in seen_sources:
+                    continue
+                seen_sources.add(key)
+                deduped_sources.append(candidate)
+            source_candidates = deduped_sources
+            deduped_tests = []
+            seen_tests = set()
+            for candidate in related_tests:
+                key = str(candidate)
+                if key in seen_tests:
+                    continue
+                seen_tests.add(key)
+                deduped_tests.append(candidate)
+            related_tests = deduped_tests[:3]
+
+        if (
+            not source_candidates
+            and not related_tests
+            and not symbol
+            and not mypy_failures
+            and not dependency_hints
+            and not validation_hints
+            and not verification_requirement_hints
+        ):
             return ""
 
         def _display(path: Path) -> str:
@@ -3283,12 +3851,30 @@ policy: {policy}
             lines.append(f"- {_display(candidate)}")
         if symbol and source_candidates:
             lines.append(f"Implement the missing symbol `{symbol}` in `{_display(source_candidates[0])}`.")
-        if mypy_path:
+        for mypy_path, mypy_message in mypy_failures:
             lines.append(f"Address the mypy failure at `{mypy_path}`: {mypy_message}.")
-            if mypy_fix_hint:
-                lines.append(mypy_fix_hint)
+        for route in dict.fromkeys(explicit_routes):
+            lines.append(
+                f"Implement the required route `{route}` in the Flask handler file, update the template/forms that call it, and add or extend a focused pytest case that exercises it."
+            )
+        for hint in dict.fromkeys(mypy_fix_hints):
+            lines.append(hint)
         for hint in dependency_hints:
             lines.append(hint)
+        for hint in validation_hints:
+            lines.append(hint)
+        for artifact_path in missing_explicit_artifacts[:5]:
+            lines.append(f"Create the missing required artifact `{_display(artifact_path)}` before stopping.")
+        if is_scaffold_story and requires_app_py_only and root_main.exists():
+            lines.append(
+                "The acceptance criteria require `app.py` as the only root entrypoint. Remove the extra root `main.py` file (or move any needed logic into `app.py`) before rerunning verification."
+            )
+        for hint in verification_requirement_hints:
+            lines.append(hint)
+        if is_scaffold_story and self._ralph_story_requires_tests(story):
+            lines.append(
+                "For this Flask scaffold story, create `tests/test_app.py` with at least one real route test before stopping."
+            )
         if command_phrase:
             lines.append(f"Wire the `{command_phrase}` command through the CLI entrypoint so the command path is reachable.")
         if related_tests:
@@ -3304,7 +3890,7 @@ policy: {policy}
     def _ralph_python_packaging_hint(self, project_dir: Path) -> str:
         pyproject_path = project_dir / "pyproject.toml"
         app_dir = project_dir / "app"
-        if not pyproject_path.exists() or not app_dir.is_dir():
+        if not pyproject_path.exists():
             return ""
         try:
             pyproject_text = pyproject_path.read_text(encoding="utf-8")
@@ -3312,12 +3898,26 @@ policy: {policy}
             return ""
         if "[tool.hatch.build.targets.wheel]" in pyproject_text:
             return ""
+        if app_dir.is_dir():
+            return (
+                "Python packaging hint:\n"
+                "- If Hatchling says it cannot determine which files to ship and your code is under `app/`, add this to `pyproject.toml`:\n"
+                "  [tool.hatch.build.targets.wheel]\n"
+                "  packages = [\"app\"]\n"
+                "- Then rerun `uv sync` or the verification command.\n"
+            )
+        includes = self._ralph_single_file_hatchling_includes(project_dir)
+        if includes:
+            include_lines = ", ".join(f'"{item}"' for item in includes)
+            return (
+                "Python packaging hint:\n"
+                "- If Hatchling says it cannot determine which files to ship for a single-file app project, add this to `pyproject.toml`:\n"
+                "  [tool.hatch.build.targets.wheel]\n"
+                f"  include = [{include_lines}]\n"
+                "- Then rerun `uv sync` or the verification command.\n"
+            )
         return (
-            "Python packaging hint:\n"
-            "- If Hatchling says it cannot determine which files to ship and your code is under `app/`, add this to `pyproject.toml`:\n"
-            "  [tool.hatch.build.targets.wheel]\n"
-            "  packages = [\"app\"]\n"
-            "- Then rerun `uv sync` or the verification command.\n"
+            ""
         )
 
     def _ralph_subagent_workspace(self, run_dir: Path, project_dir: Path, task_prompt: str = "") -> Path:
@@ -3357,8 +3957,13 @@ policy: {policy}
                 add_path(match)
             for match in re.findall(r"\b(?:app|data|docs|src|templates|static|tests)/[A-Za-z0-9_./-]+\b", item):
                 add_path(match)
+            lowered_item = item.lower()
             for match in re.findall(r"(?<![A-Za-z0-9_.-])((?:/|~)[^\s，。,;；:：]+)", item):
+                if match.startswith("//"):
+                    continue
                 if "、" in match:
+                    continue
+                if match.startswith("/") and any(token in lowered_item for token in ("route", "路由", "endpoint", "接口")):
                     continue
                 add_path(match)
             for match in re.findall(
@@ -3370,6 +3975,31 @@ policy: {policy}
         deduped: list[Path] = []
         seen: set[str] = set()
         for path in artifact_paths:
+            key = str(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(path)
+        return deduped
+
+    def _ralph_missing_explicit_artifact_paths(self, story: dict, project_dir: Path) -> list[Path]:
+        missing: list[Path] = []
+        explicit_artifact_paths = self._ralph_extract_explicit_artifact_paths(story, project_dir)
+        project_dir_resolved: Path | None = None
+        with contextlib.suppress(Exception):
+            project_dir_resolved = project_dir.resolve()
+        for artifact_path in explicit_artifact_paths:
+            resolved_artifact = artifact_path
+            with contextlib.suppress(Exception):
+                resolved_artifact = artifact_path.resolve()
+            if project_dir_resolved is not None and resolved_artifact == project_dir_resolved:
+                continue
+            if artifact_path.exists():
+                continue
+            missing.append(artifact_path)
+        deduped: list[Path] = []
+        seen: set[str] = set()
+        for path in missing:
             key = str(path)
             if key in seen:
                 continue
@@ -3395,8 +4025,20 @@ policy: {policy}
             seen.add(key)
             deduped.append(path)
         if role not in {"researcher", "writer"}:
-            has_file_target = any(path.suffix for path in deduped)
-            if not has_file_target and str(project_dir) not in seen:
+            generic_roots = {"app", "src", "tests", "templates", "static", "docs", "data"}
+            narrowed: list[Path] = []
+            for path in deduped:
+                try:
+                    rel = path.relative_to(project_dir)
+                except Exception:
+                    narrowed.append(path)
+                    continue
+                parts = rel.parts
+                if len(parts) == 1 and (rel.name == "pyproject.toml" or rel.name in generic_roots):
+                    continue
+                narrowed.append(path)
+            deduped = narrowed
+            if str(project_dir) not in {str(path) for path in deduped}:
                 deduped.append(project_dir)
         return deduped
 
@@ -3409,11 +4051,7 @@ policy: {policy}
                     continue
                 if path.is_dir():
                     latest: float | None = path.stat().st_mtime
-                    for child in path.rglob("*"):
-                        if not child.is_file():
-                            continue
-                        if self._ralph_should_ignore_artifact(child, path):
-                            continue
+                    for child in self._ralph_iter_artifact_files(path, path):
                         child_mtime = child.stat().st_mtime
                         latest = child_mtime if latest is None else max(latest, child_mtime)
                     snapshot[str(path)] = latest
@@ -3439,10 +4077,8 @@ policy: {policy}
                     continue
                 if path.is_dir():
                     previous = snapshot.get(str(path))
-                    for child in sorted(path.rglob("*")):
-                        if not child.is_file() or child.stat().st_size <= 0:
-                            continue
-                        if self._ralph_should_ignore_artifact(child, path):
+                    for child in self._ralph_iter_artifact_files(path, path):
+                        if child.stat().st_size <= 0:
                             continue
                         current = child.stat().st_mtime
                         threshold = previous
@@ -3528,6 +4164,7 @@ policy: {policy}
     def _ralph_can_supervisor_autofinalize(
         self,
         story: dict,
+        project_dir: Path,
         changed_artifacts: list[Path],
         verification_passed: bool,
     ) -> bool:
@@ -3538,6 +4175,166 @@ policy: {policy}
             return False
         if self._ralph_story_requires_typecheck(story) and not verification_passed:
             return False
+        if not self._ralph_autofinalize_completion_guard(story, project_dir):
+            return False
+        return True
+
+    def _ralph_autofinalize_completion_guard(self, story: dict, project_dir: Path) -> bool:
+        def has_named_python(*names: str) -> bool:
+            wanted = {name.lower() for name in names}
+            for path in project_dir.rglob("*.py"):
+                if self._ralph_should_ignore_artifact(path, project_dir):
+                    continue
+                if path.name.lower() in wanted:
+                    return True
+            return False
+
+        def has_frontend_assets() -> bool:
+            for path in project_dir.rglob("*"):
+                if not path.is_file() or self._ralph_should_ignore_artifact(path, project_dir):
+                    continue
+                if path.suffix.lower() in {".html", ".css", ".js"}:
+                    return True
+            return False
+
+        def contains_required_route(route: str) -> bool:
+            normalized = route.strip().lower()
+            if not normalized:
+                return False
+            for path in project_dir.rglob("*.py"):
+                if self._ralph_should_ignore_artifact(path, project_dir):
+                    continue
+                try:
+                    body = path.read_text(encoding="utf-8").lower()
+                except Exception:
+                    continue
+                if normalized in body:
+                    return True
+            return False
+
+        def has_inline_model_definition() -> bool:
+            field_tokens = ("id", "title", "completed", "done", "created_at")
+            class_tokens = ("class todo", "class task", "@dataclass")
+            for path in project_dir.rglob("*.py"):
+                if self._ralph_should_ignore_artifact(path, project_dir):
+                    continue
+                try:
+                    body = path.read_text(encoding="utf-8").lower()
+                except Exception:
+                    continue
+                if not any(token in body for token in class_tokens):
+                    continue
+                if any(token in body for token in field_tokens):
+                    return True
+            return False
+
+        text = "\n".join(
+            [
+                str(story.get("title") or ""),
+                str(story.get("description") or ""),
+                *[str(item) for item in story.get("acceptanceCriteria", []) or []],
+            ]
+        ).lower()
+        requires_app_py_only = "app.py 作为入口文件" in text and "不使用 main.py" in text
+
+        is_bootstrap_story = any(token in text for token in ("初始化", "bootstrap", "scaffold", "基础架构"))
+
+        if is_bootstrap_story:
+            has_package_dir = (project_dir / "app").is_dir() or (project_dir / "src").is_dir()
+            has_root_web_layout = (
+                (project_dir / "main.py").is_file()
+                and (project_dir / "templates").is_dir()
+                and (project_dir / "static").is_dir()
+            )
+            has_root_entry = has_named_python("main.py", "app.py")
+            has_source_scaffold = has_named_python(
+                "main.py",
+                "app.py",
+                "__init__.py",
+                "database.py",
+                "db.py",
+                "models.py",
+                "config.py",
+            )
+            if not (project_dir / "pyproject.toml").is_file():
+                return False
+            if not (has_package_dir or has_root_web_layout or has_root_entry) or not has_source_scaffold:
+                return False
+            requires_db_bootstrap = any(
+                token in text
+                for token in (
+                    "数据库模型",
+                    "database model",
+                    "create table",
+                    "task 表",
+                    "task table",
+                    "sqlite 数据库模型",
+                    "创建 sqlite 数据库模型",
+                    "创建数据库模型",
+                )
+            )
+            if requires_db_bootstrap:
+                has_embedded_db_logic = False
+                db_candidates = [
+                    project_dir / "app.py",
+                    project_dir / "main.py",
+                    project_dir / "models.py",
+                    project_dir / "database.py",
+                    project_dir / "db.py",
+                ]
+                for root_name in ("app", "src"):
+                    root_dir = project_dir / root_name
+                    if root_dir.is_dir():
+                        db_candidates.extend(root_dir.rglob("*.py"))
+                for path in db_candidates:
+                    if not path.is_file():
+                        continue
+                    try:
+                        body = path.read_text(encoding="utf-8").lower()
+                    except Exception:
+                        continue
+                    if any(token in body for token in ("sqlite", "sqlalchemy", "init_db", "create table", "task")):
+                        has_embedded_db_logic = True
+                        break
+                if not has_embedded_db_logic:
+                    return False
+            if self._ralph_story_requires_tests(story):
+                tests_dir = project_dir / "tests"
+                if not tests_dir.is_dir() or not any(tests_dir.rglob("test_*.py")):
+                    return False
+            if requires_app_py_only and (project_dir / "main.py").is_file():
+                return False
+            return True
+
+        if any(token in text for token in ("model", "模型")):
+            if not (has_named_python("models.py") or has_inline_model_definition()):
+                return False
+        if any(token in text for token in ("数据库", "database", "sqlite", "持久化")):
+            if not has_named_python("database.py", "db.py"):
+                return False
+
+        if any(token in text for token in (" api", "api ", "接口", "endpoint", "route", "router", "crud")):
+            if not (has_named_python("main.py", "api.py") or any((project_dir / root).is_dir() for root in ("routers", "routes", "api"))):
+                return False
+
+        if self._ralph_story_requires_tests(story):
+            tests_dir = project_dir / "tests"
+            if not tests_dir.is_dir() or not any(tests_dir.rglob("test_*.py")):
+                return False
+
+        if any(token in text for token in ("web", "页面", "前端", "ui", "html", "template", "jinja")):
+            if not has_frontend_assets():
+                return False
+
+        explicit_routes = [
+            route.lower()
+            for route in re.findall(r"(?<![A-Za-z0-9_.-])(/[\w/<>{}:.-]+)", text)
+            if route and not route.startswith("//")
+        ]
+        for route in dict.fromkeys(explicit_routes):
+            if not contains_required_route(route):
+                return False
+
         return True
 
     async def _ralph_retry_incomplete_story(
@@ -3574,15 +4371,31 @@ policy: {policy}
         timeout_budgets = self._ralph_timeout_retry_budgets(getattr(self.adapter, "timeout", None))
         recovery_idle_watchdog = self._ralph_recovery_idle_watchdog_seconds_for_attempt(
             story,
-            float(getattr(self, "_ralph_recovery_idle_watchdog_seconds", 60.0)),
+            float(getattr(self, "_ralph_recovery_idle_watchdog_seconds", 0.0)),
             latest_output=latest_output,
+            failure_reason=failure_reason,
         )
         recovery_execution_watchdog = self._ralph_recovery_execution_watchdog_seconds_for_attempt(
             story,
-            float(getattr(self, "_ralph_recovery_execution_watchdog_seconds", 0.0))
-            or float(timeout_budgets[0]),
+            float(getattr(self, "_ralph_recovery_execution_watchdog_seconds", 0.0)),
             latest_output=latest_output,
+            failure_reason=failure_reason,
         )
+        configured_recovery_initial_grace = float(
+            getattr(self, "_ralph_recovery_initial_grace_seconds", 0.0)
+        )
+        recovery_initial_grace = self._ralph_recovery_initial_grace_seconds_for_attempt(
+            story,
+            configured_recovery_initial_grace,
+            latest_output=latest_output,
+            failure_reason=failure_reason,
+        )
+        if (
+            configured_recovery_initial_grace <= 0
+            and recovery_idle_watchdog > 0
+            and recovery_idle_watchdog <= 5.0
+        ):
+            recovery_initial_grace = recovery_idle_watchdog
         configured_poll_interval = float(getattr(self, "_ralph_prompt_poll_seconds", 2.0))
         poll_interval = configured_poll_interval
         if recovery_idle_watchdog > 0:
@@ -3603,10 +4416,12 @@ policy: {policy}
             attempt_timeout: StdioACPTimeoutError | None = None
             prompt_cancel_reason = ""
             auto_finalized = False
+            verification_failure_cancelled = False
             try:
                 last_activity = asyncio.get_running_loop().time()
                 activity_clock = {"last": last_activity}
                 attempt_started = last_activity
+                observed_activity = False
                 activity_snapshot = self._ralph_snapshot_artifacts(activity_paths)
                 artifact_snapshot = self._ralph_snapshot_artifacts(artifact_paths)
                 artifact_watch_started: float | None = None
@@ -3633,24 +4448,30 @@ policy: {policy}
                 while not prompt_task.done():
                     await asyncio.sleep(poll_interval)
                     now = asyncio.get_running_loop().time()
+                    if activity_clock["last"] > last_activity:
+                        observed_activity = True
                     last_activity = max(last_activity, activity_clock["last"])
 
                     synced_outputs = self._ralph_sync_run_dir_outputs_to_project_dir(run_dir, project_dir)
                     if synced_outputs:
+                        observed_activity = True
                         last_activity = now
+                        artifact_watch_started = now
                         activity_snapshot = self._ralph_snapshot_artifacts(activity_paths)
                         artifact_snapshot = self._ralph_snapshot_artifacts(artifact_paths)
 
                     activity_changed = self._ralph_changed_artifacts(activity_paths, activity_snapshot)
                     if activity_changed:
+                        observed_activity = True
                         last_activity = now
+                        artifact_watch_started = now
                         activity_snapshot = self._ralph_snapshot_artifacts(activity_paths)
 
                     changed_artifacts = self._ralph_changed_artifacts(artifact_paths, artifact_snapshot)
                     if changed_artifacts:
+                        observed_activity = True
                         last_activity = now
-                        if artifact_watch_started is None:
-                            artifact_watch_started = now
+                        artifact_watch_started = now
                         for path in changed_artifacts:
                             if not any(str(path) == str(item) for item in observed_artifacts):
                                 observed_artifacts.append(path)
@@ -3660,9 +4481,16 @@ policy: {policy}
                             project_dir=project_dir,
                             story=story,
                         )
+                        verification_evidence = ""
+                        if candidate_artifacts and not verification_passed:
+                            verification_evidence = await self._ralph_collect_verification_evidence(
+                                project_dir=project_dir,
+                                story=story,
+                            )
                         if (
                             self._ralph_can_supervisor_autofinalize(
                                 story,
+                                project_dir,
                                 candidate_artifacts,
                                 verification_passed,
                             )
@@ -3679,9 +4507,18 @@ policy: {policy}
                             auto_finalized = True
                             with contextlib.suppress(Exception):
                                 await stdio._client.cancel(session_id)
-                            prompt_task.cancel()
-                            with contextlib.suppress(asyncio.CancelledError):
-                                await prompt_task
+                            await self._ralph_cancel_prompt_task(prompt_task)
+                            break
+                        if candidate_artifacts and verification_evidence:
+                            prompt_cancel_reason = "Supervisor verification failed"
+                            verification_failure_cancelled = True
+                            logger.info(
+                                "Ralph recovery verification failed for {}; cancelling current recovery prompt to retry with evidence",
+                                chat_id,
+                            )
+                            with contextlib.suppress(Exception):
+                                await stdio._client.cancel(session_id)
+                            await self._ralph_cancel_prompt_task(prompt_task)
                             break
                         artifact_watch_started = now
                         observed_artifacts = candidate_artifacts
@@ -3700,12 +4537,23 @@ policy: {policy}
                         )
                         with contextlib.suppress(Exception):
                             await stdio._client.cancel(session_id)
-                        prompt_task.cancel()
-                        with contextlib.suppress(asyncio.CancelledError):
-                            await prompt_task
+                        await self._ralph_cancel_prompt_task(prompt_task)
                         break
 
                     if recovery_idle_watchdog > 0 and now - last_activity >= recovery_idle_watchdog:
+                        has_story_output = bool(observed_artifacts) or self._ralph_has_story_artifact_output(
+                            artifact_paths
+                        )
+                        if not has_story_output and self._ralph_pick_role(story) not in {"researcher", "writer"}:
+                            has_story_output = bool(self._ralph_materialized_artifacts([project_dir]))
+                        if (
+                            not observed_activity
+                            and recovery_initial_grace > 0
+                            and now - attempt_started < recovery_initial_grace
+                        ):
+                            continue
+                        if observed_activity and has_story_output:
+                            continue
                         prompt_cancel_reason = f"Prompt timeout (idle watchdog after {int(recovery_idle_watchdog)}s)"
                         logger.warning(
                             "Ralph recovery idle watchdog exceeded for {} after {}s (attempt {}/{})",
@@ -3716,9 +4564,7 @@ policy: {policy}
                         )
                         with contextlib.suppress(Exception):
                             await stdio._client.cancel(session_id)
-                        prompt_task.cancel()
-                        with contextlib.suppress(asyncio.CancelledError):
-                            await prompt_task
+                        await self._ralph_cancel_prompt_task(prompt_task)
                         break
 
                 self._ralph_sync_run_dir_outputs_to_project_dir(run_dir, project_dir)
@@ -3727,6 +4573,8 @@ policy: {policy}
                 try:
                     return await prompt_task
                 except asyncio.CancelledError:
+                    if verification_failure_cancelled:
+                        return ACPResponse(content="", error=prompt_cancel_reason or "Supervisor verification failed")
                     raise StdioACPTimeoutError(prompt_cancel_reason or "Prompt timeout (idle)")
             except StdioACPTimeoutError as exc:
                 attempt_timeout = exc
@@ -3766,17 +4614,51 @@ policy: {policy}
         role = self._ralph_pick_role(story or {})
         if role in {"researcher", "writer"}:
             return max(base, 300.0)
+        if role in {"engineer", "qa"}:
+            return base if base > 0 else 120.0
         return base
+
+    def _ralph_story_initial_grace_seconds_for_story(
+        self,
+        story: Optional[dict],
+        base_seconds: float,
+    ) -> float:
+        configured = float(base_seconds or 0)
+        if configured > 0:
+            return configured
+        role = self._ralph_pick_role(story or {})
+        if role in {"engineer", "qa"}:
+            return 90.0
+        if role in {"researcher", "writer"}:
+            return 60.0
+        return 45.0
 
     def _ralph_recovery_idle_watchdog_seconds_for_attempt(
         self,
         story: Optional[dict],
         base_seconds: float,
         latest_output: str = "",
+        failure_reason: str = "",
     ) -> float:
+        raw_base = float(base_seconds or 0)
         base = self._ralph_idle_watchdog_seconds(story, base_seconds)
         role = self._ralph_pick_role(story or {})
-        lowered = (latest_output or "").lower()
+        lowered = f"{latest_output or ''}\n{failure_reason or ''}".lower()
+        if role in {"engineer", "qa"} and any(
+            token in lowered
+            for token in (
+                "no module named",
+                "cannot find implementation or library stub",
+                "import-not-found",
+                "dependency",
+                "dependencies",
+                "requires the",
+                "module named",
+                "uv sync",
+                "uv add",
+            )
+        ):
+            return raw_base if raw_base > 0 else 120.0
         if role in {"engineer", "qa"} and any(
             token in lowered
             for token in (
@@ -3786,10 +4668,55 @@ policy: {policy}
                 "traceback",
                 "tests failed",
                 "typecheck",
+                "prompt execution watchdog exceeded",
+                "watchdog exceeded",
+                "prompt timeout",
+                "timed out",
+                "tool failed",
             )
         ):
-            return max(base, 180.0)
+            return raw_base if raw_base > 0 else 60.0
         return base
+
+    def _ralph_recovery_initial_grace_seconds_for_attempt(
+        self,
+        story: Optional[dict],
+        base_seconds: float,
+        latest_output: str = "",
+        failure_reason: str = "",
+    ) -> float:
+        configured = float(base_seconds or 0)
+        if configured > 0:
+            return configured
+        role = self._ralph_pick_role(story or {})
+        lowered = f"{latest_output or ''}\n{failure_reason or ''}".lower()
+        if role in {"engineer", "qa"} and any(
+            token in lowered
+            for token in (
+                "no module named",
+                "cannot find implementation or library stub",
+                "import-not-found",
+                "dependency",
+                "dependencies",
+                "requires the",
+                "module named",
+                "uv sync",
+                "uv add",
+                "typecheck",
+                "tests failed",
+                "prompt execution watchdog exceeded",
+                "watchdog exceeded",
+                "prompt timeout",
+                "timed out",
+                "tool failed",
+            )
+        ):
+            return 90.0
+        if role in {"engineer", "qa"}:
+            return 90.0
+        if role in {"researcher", "writer"}:
+            return 60.0
+        return 45.0
 
     def _ralph_execution_watchdog_seconds(
         self,
@@ -3799,21 +4726,20 @@ policy: {policy}
         base = float(base_seconds or 0)
         if base > 0:
             return base
-        if base <= 0:
-            base = float(getattr(self.adapter, "timeout", 0) or 600)
         role = self._ralph_pick_role(story or {})
-        cap = 300.0 if role in {"researcher", "writer"} else 90.0
-        return max(30.0, min(base, cap))
+        floor = 300.0 if role in {"engineer", "qa", "researcher", "writer"} else 180.0
+        return max(30.0, floor)
 
     def _ralph_recovery_execution_watchdog_seconds_for_attempt(
         self,
         story: Optional[dict],
         base_seconds: float,
         latest_output: str = "",
+        failure_reason: str = "",
     ) -> float:
         base = self._ralph_execution_watchdog_seconds(story, base_seconds)
         role = self._ralph_pick_role(story or {})
-        lowered = (latest_output or "").lower()
+        lowered = f"{latest_output or ''}\n{failure_reason or ''}".lower()
         if role in {"engineer", "qa"} and any(
             token in lowered
             for token in (
@@ -3823,9 +4749,14 @@ policy: {policy}
                 "traceback",
                 "tests failed",
                 "typecheck",
+                "prompt execution watchdog exceeded",
+                "watchdog exceeded",
+                "prompt timeout",
+                "timed out",
+                "tool failed",
             )
         ):
-            return max(base, 180.0)
+            return min(base, 180.0)
         return base
 
     def _ralph_prompt_supports_callbacks(self, prompt_fn) -> bool:
@@ -3834,6 +4765,12 @@ policy: {policy}
         except (TypeError, ValueError):
             return False
         return {"on_chunk", "on_tool_call", "on_event"}.issubset(params.keys())
+
+    async def _ralph_cancel_prompt_task(self, prompt_task: asyncio.Task[Any]) -> None:
+        if not prompt_task.done():
+            prompt_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, StdioACPTimeoutError, Exception):
+            await prompt_task
 
     def _ralph_extract_final_summary(self, progress_text: str) -> str:
         if not progress_text:
@@ -4532,8 +5469,21 @@ policy: {policy}
                 current_story = story if isinstance(story, dict) else {}
                 idle_watchdog = self._ralph_idle_watchdog_seconds(
                     current_story,
-                    float(getattr(self, "_ralph_story_idle_watchdog_seconds", 60.0)),
+                    float(getattr(self, "_ralph_story_idle_watchdog_seconds", 0.0)),
                 )
+                story_initial_grace = self._ralph_story_initial_grace_seconds_for_story(
+                    current_story,
+                    float(getattr(self, "_ralph_story_initial_grace_seconds", 0.0)),
+                )
+                configured_story_initial_grace = float(
+                    getattr(self, "_ralph_story_initial_grace_seconds", 0.0) or 0.0
+                )
+                if (
+                    configured_story_initial_grace <= 0
+                    and idle_watchdog > 0
+                    and idle_watchdog <= 5.0
+                ):
+                    story_initial_grace = idle_watchdog
                 execution_watchdog = self._ralph_execution_watchdog_seconds(
                     current_story,
                     float(getattr(self, "_ralph_story_execution_watchdog_seconds", 0.0)),
@@ -4541,6 +5491,7 @@ policy: {policy}
                 settle_timeout = float(getattr(self, "_ralph_story_settle_timeout_seconds", 3.0))
                 last_activity = asyncio.get_running_loop().time()
                 activity_clock = {"last": last_activity}
+                observed_activity = False
                 attempt_started = last_activity
                 resume_anchor_mtime = None
                 started_at = state.get("current_started_at")
@@ -4571,6 +5522,7 @@ policy: {policy}
                         )
                         should_autofinalize = self._ralph_can_supervisor_autofinalize(
                             current_story,
+                            project_dir,
                             existing_artifacts,
                             verification_passed,
                         )
@@ -4589,6 +5541,7 @@ policy: {policy}
                         approval_mode="yolo",
                     )
                     self._ralph_active_sessions[chat_id] = session_id
+                    verification_failure_cancelled = False
                     prompt = self._ralph_build_subagent_prompt(
                         run_dir=run_dir,
                         project_dir=project_dir,
@@ -4624,10 +5577,14 @@ policy: {policy}
                         if state.get("status") in {"stopped", "failed"}:
                             return
                         now = asyncio.get_running_loop().time()
+                        if activity_clock["last"] > last_activity:
+                            observed_activity = True
                         last_activity = max(last_activity, activity_clock["last"])
                         synced_outputs = self._ralph_sync_run_dir_outputs_to_project_dir(run_dir, project_dir)
                         if synced_outputs:
+                            observed_activity = True
                             last_activity = now
+                            artifact_watch_started = now
                             activity_snapshot = self._ralph_snapshot_artifacts(activity_paths)
                         activity_changed = self._ralph_changed_artifacts(
                             activity_paths,
@@ -4635,7 +5592,9 @@ policy: {policy}
                             anchor_mtime=artifact_anchor_mtime,
                         )
                         if activity_changed:
+                            observed_activity = True
                             last_activity = now
+                            artifact_watch_started = now
                             activity_snapshot = self._ralph_snapshot_artifacts(activity_paths)
                         changed_artifacts = self._ralph_changed_artifacts(
                             artifact_paths,
@@ -4643,14 +5602,15 @@ policy: {policy}
                             anchor_mtime=artifact_anchor_mtime,
                         )
                         if changed_artifacts:
-                            if artifact_watch_started is None:
-                                artifact_watch_started = now
+                            observed_activity = True
+                            artifact_watch_started = now
                             for path in changed_artifacts:
                                 if not any(str(path) == str(item) for item in observed_artifacts):
                                     observed_artifacts.append(path)
                         if artifact_watch_started is not None and now - artifact_watch_started >= artifact_watchdog:
                             candidate_artifacts = observed_artifacts or self._ralph_materialized_artifacts(artifact_paths)
                             should_autofinalize = False
+                            verification_evidence = ""
                             if self._ralph_pick_role(current_story) in {"researcher", "writer"}:
                                 should_autofinalize = bool(candidate_artifacts)
                             else:
@@ -4660,9 +5620,15 @@ policy: {policy}
                                 )
                                 should_autofinalize = self._ralph_can_supervisor_autofinalize(
                                     current_story,
+                                    project_dir,
                                     candidate_artifacts,
                                     verification_passed,
                                 )
+                                if candidate_artifacts and not verification_passed:
+                                    verification_evidence = await self._ralph_collect_verification_evidence(
+                                        project_dir=project_dir,
+                                        story=current_story,
+                                    )
                             if should_autofinalize and self._ralph_autofinalize_story_from_artifacts(
                                 prd_path=prd_path,
                                 progress_path=progress_path,
@@ -4674,9 +5640,21 @@ policy: {policy}
                                     await stdio._client.cancel(session_id)
                                 except Exception:
                                     pass
-                                prompt_task.cancel()
-                                with contextlib.suppress(asyncio.CancelledError):
-                                    await prompt_task
+                                await self._ralph_cancel_prompt_task(prompt_task)
+                                break
+                            if candidate_artifacts and verification_evidence:
+                                prompt_cancel_reason = "Supervisor verification failed"
+                                verification_failure_cancelled = True
+                                logger.info(
+                                    "Ralph story verification failed for {}:{}; cancelling current prompt and entering recovery",
+                                    channel,
+                                    chat_id,
+                                )
+                                try:
+                                    await stdio._client.cancel(session_id)
+                                except Exception:
+                                    pass
+                                await self._ralph_cancel_prompt_task(prompt_task)
                                 break
                             artifact_watch_started = now
                             observed_artifacts = candidate_artifacts
@@ -4695,11 +5673,21 @@ policy: {policy}
                                 await stdio._client.cancel(session_id)
                             except Exception:
                                 pass
-                            prompt_task.cancel()
-                            with contextlib.suppress(asyncio.CancelledError):
-                                await prompt_task
+                            await self._ralph_cancel_prompt_task(prompt_task)
                             break
                         if not auto_finalized and idle_watchdog > 0 and now - last_activity >= idle_watchdog:
+                            has_story_output = bool(observed_artifacts) or self._ralph_has_story_artifact_output(
+                                artifact_paths
+                            )
+                            if (
+                                not has_story_output
+                                and self._ralph_pick_role(current_story) not in {"researcher", "writer"}
+                            ):
+                                has_story_output = bool(self._ralph_materialized_artifacts([project_dir]))
+                            if not observed_activity and now - attempt_started < story_initial_grace:
+                                continue
+                            if observed_activity and has_story_output:
+                                continue
                             prompt_cancel_reason = f"Prompt idle watchdog exceeded ({int(idle_watchdog)}s)"
                             logger.warning(
                                 "Ralph story idle watchdog exceeded for {}:{} after {}s; cancelling current prompt",
@@ -4711,9 +5699,7 @@ policy: {policy}
                                 await stdio._client.cancel(session_id)
                             except Exception:
                                 pass
-                            prompt_task.cancel()
-                            with contextlib.suppress(asyncio.CancelledError):
-                                await prompt_task
+                            await self._ralph_cancel_prompt_task(prompt_task)
                             break
                 if auto_finalized:
                     response = ACPResponse(content="", error=None)
@@ -4721,7 +5707,10 @@ policy: {policy}
                     try:
                         response = await prompt_task
                     except asyncio.CancelledError:
-                        response = ACPResponse(content="", error=prompt_cancel_reason or "Prompt cancelled")
+                        if verification_failure_cancelled:
+                            response = ACPResponse(content="", error=prompt_cancel_reason or "Supervisor verification failed")
+                        else:
+                            response = ACPResponse(content="", error=prompt_cancel_reason or "Prompt cancelled")
                     except Exception as exc:
                         response = ACPResponse(content="", error=str(exc))
                 self._ralph_sync_run_dir_outputs_to_project_dir(run_dir, project_dir)
@@ -4833,6 +5822,7 @@ policy: {policy}
                         autofinalize_artifacts = self._ralph_materialized_artifacts([project_dir])
                     if self._ralph_can_supervisor_autofinalize(
                         current_story_after if isinstance(current_story_after, dict) else story,
+                        project_dir,
                         autofinalize_artifacts,
                         verification_passed,
                     ):
@@ -5295,7 +6285,10 @@ policy: {policy}
                 await self._send_command_reply(msg, "\n".join(lines))
                 return True
             if cmd == "/language" and args:
-                lang = args[0]
+                lang = self._normalize_language_setting(args[0])
+                if not lang:
+                    await self._send_command_reply(msg, self._msg("language_set_failed", error="unsupported language"))
+                    return True
                 settings_path = self.workspace / ".iflow" / "settings.json"
                 try:
                     if settings_path.exists():

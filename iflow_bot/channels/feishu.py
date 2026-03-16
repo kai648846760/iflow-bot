@@ -5,6 +5,7 @@
 """
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -36,6 +37,8 @@ try:
         GetMessageResourceRequest,
         PatchMessageRequest,
         PatchMessageRequestBody,
+        P2ImChatAccessEventBotP2pChatEnteredV1,
+        P2ImMessageMessageReadV1,
         P2ImMessageReceiveV1,
         P2ImMessageReactionCreatedV1,
         P2ImMessageReactionDeletedV1,
@@ -329,6 +332,7 @@ class FeishuChannel(BaseChannel):
         self._client: Any = None
         self._ws_client: Any = None
         self._ws_thread: Optional[threading.Thread] = None
+        self._ws_loop: Optional[asyncio.AbstractEventLoop] = None
         self._processed_message_ids: OrderedDict[str, None] = OrderedDict()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._streaming_message_ids: dict[str, str] = {}
@@ -371,6 +375,10 @@ class FeishuChannel(BaseChannel):
             self._on_reaction_created_sync
         ).register_p2_im_message_reaction_deleted_v1(
             self._on_reaction_deleted_sync
+        ).register_p2_im_message_message_read_v1(
+            self._on_message_read_sync
+        ).register_p2_im_chat_access_event_bot_p2p_chat_entered_v1(
+            self._on_bot_p2p_chat_entered_sync
         ).build()
 
         # Create WebSocket client for long connection
@@ -386,6 +394,7 @@ class FeishuChannel(BaseChannel):
             import time
             import asyncio
             while self._running:
+                new_loop: Optional[asyncio.AbstractEventLoop] = None
                 try:
                     # 关键修复：lark_oapi/ws/client.py 在模块级别调用 asyncio.get_event_loop()
                     # 并保存在模块变量中。我们需要替换这个变量为新线程的事件循环
@@ -393,13 +402,35 @@ class FeishuChannel(BaseChannel):
 
                     # 创建新的事件循环并替换模块变量
                     new_loop = asyncio.new_event_loop()
+                    self._ws_loop = new_loop
                     asyncio.set_event_loop(new_loop)
                     ws_client_module.loop = new_loop
 
                     # 现在可以安全地调用 start()
                     self._ws_client.start()
+                except RuntimeError as e:
+                    if not self._running and "Event loop stopped before Future completed" in str(e):
+                        logger.debug("Feishu WebSocket loop stopped during shutdown")
+                    else:
+                        logger.warning(f"Feishu WebSocket error: {e}")
                 except Exception as e:
                     logger.warning(f"Feishu WebSocket error: {e}")
+                finally:
+                    if new_loop is not None:
+                        pending = [task for task in asyncio.all_tasks(new_loop) if not task.done()]
+                        for task in pending:
+                            task.cancel()
+                        if pending:
+                            with contextlib.suppress(Exception):
+                                new_loop.run_until_complete(
+                                    asyncio.gather(*pending, return_exceptions=True)
+                                )
+                        with contextlib.suppress(Exception):
+                            new_loop.run_until_complete(new_loop.shutdown_asyncgens())
+                        with contextlib.suppress(Exception):
+                            new_loop.close()
+                        if self._ws_loop is new_loop:
+                            self._ws_loop = None
                 if self._running:
                     time.sleep(5)
 
@@ -416,11 +447,24 @@ class FeishuChannel(BaseChannel):
     async def stop(self) -> None:
         """Stop the Feishu bot."""
         self._running = False
-        if self._ws_client:
-            try:
-                self._ws_client.stop()
-            except Exception as e:
-                logger.warning(f"Error stopping WebSocket client: {e}")
+        if self._ws_loop and self._ws_client:
+            def _shutdown_ws() -> None:
+                async def _close() -> None:
+                    with contextlib.suppress(Exception):
+                        await self._ws_client._disconnect()
+                    current = asyncio.current_task()
+                    for task in asyncio.all_tasks():
+                        if task is not current:
+                            task.cancel()
+                    asyncio.get_running_loop().stop()
+
+                asyncio.create_task(_close())
+
+            with contextlib.suppress(Exception):
+                self._ws_loop.call_soon_threadsafe(_shutdown_ws)
+        if self._ws_thread and self._ws_thread.is_alive():
+            await asyncio.to_thread(self._ws_thread.join, 5)
+        self._ws_thread = None
         logger.info("Feishu bot stopped")
 
     # Regex patterns for markdown conversion
@@ -1002,6 +1046,14 @@ class FeishuChannel(BaseChannel):
 
     def _on_reaction_deleted_sync(self, data: "P2ImMessageReactionDeletedV1") -> None:
         """Handle message reaction deleted event (no-op, just to suppress errors)."""
+        pass
+
+    def _on_message_read_sync(self, data: "P2ImMessageMessageReadV1") -> None:
+        """Handle read receipt events (no-op, just to suppress SDK noise)."""
+        pass
+
+    def _on_bot_p2p_chat_entered_sync(self, data: "P2ImChatAccessEventBotP2pChatEnteredV1") -> None:
+        """Handle bot access events (no-op, just to suppress SDK noise)."""
         pass
 
     def _on_message_sync(self, data: "P2ImMessageReceiveV1") -> None:

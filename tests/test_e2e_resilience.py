@@ -1,4 +1,5 @@
 import asyncio
+import threading
 from pathlib import Path
 
 import pytest
@@ -152,3 +153,47 @@ async def test_feishu_streaming_failure_path_logs(monkeypatch):
     assert any('patch failed' in line and 'recreating' in line for line in lower_logs)
     assert any('placeholder send failed' in line for line in lower_logs)
     assert any('text fallback' in line for line in lower_logs)
+
+
+@pytest.mark.asyncio
+async def test_feishu_stop_shuts_down_ws_loop_cleanly():
+    ch = FeishuChannel(FeishuConfig(app_id='x', app_secret='y', enabled=True), MessageBus())
+
+    class _FakeWsClient:
+        def __init__(self):
+            self.disconnect_calls = 0
+
+        async def _disconnect(self):
+            self.disconnect_calls += 1
+
+    fake_ws_client = _FakeWsClient()
+    ch._ws_client = fake_ws_client
+    ch._running = True
+
+    loop_ready = threading.Event()
+
+    def run_ws_loop():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        ch._ws_loop = loop
+        loop_ready.set()
+        try:
+            loop.run_forever()
+        finally:
+            pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
+            for task in pending:
+                task.cancel()
+            if pending:
+                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            loop.close()
+            ch._ws_loop = None
+
+    ch._ws_thread = threading.Thread(target=run_ws_loop, daemon=True)
+    ch._ws_thread.start()
+    assert loop_ready.wait(timeout=1)
+
+    await ch.stop()
+
+    assert fake_ws_client.disconnect_calls == 1
+    assert ch._ws_loop is None
+    assert ch._ws_thread is None

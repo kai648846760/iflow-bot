@@ -250,6 +250,63 @@ def test_ralph_prd_delivery_sanitizes_ascii_colon_story_fields():
     assert 'Typecheck passes' not in content
 
 
+def test_ralph_prd_delivery_rewrites_incomplete_story_sections_from_normalized_prd():
+    loop = AgentLoop(bus=MessageBus(), adapter=_DummyAdapter(), model='glm-5', streaming=False)
+    loop._load_language_setting = lambda: 'zh-CN'
+    prd = {
+        'project': 'Todo List Web 应用',
+        'stories': [
+            {
+                'id': 'US-003',
+                'title': '任务列表展示页面',
+                'description': '作为用户，我希望看到所有任务的列表，以便一目了然地了解待办事项。',
+                'role': 'engineer',
+                'acceptanceCriteria': [
+                    '页面加载时从数据库获取所有任务',
+                    '按创建时间倒序排列显示',
+                    '清晰展示任务内容和完成状态',
+                    'Typecheck passes',
+                ],
+            },
+            {
+                'id': 'US-004',
+                'title': '新增任务功能',
+                'description': '作为用户，我希望能够新增任务，以便记录我需要完成的事项。',
+                'role': 'engineer',
+                'acceptanceCriteria': [
+                    '提供任务输入表单',
+                    '提交后将任务保存到数据库',
+                    '页面显示新增的任务',
+                    'Typecheck passes',
+                ],
+            },
+        ],
+    }
+    prd_md = """# Todo List Web 应用 PRD
+
+## 用户故事
+
+### 用户故事 3：新增任务
+
+- **描述**：作为用户，我希望看到所有任务的列表，以便一目了然地了解待办事项。
+- **角色**：engineer
+- **验收标准**：
+
+### 用户故事 4：完成任务
+
+- **描述**：作为用户，我希望能够新增任务，以便记录我需要完成的事项。
+- **角色**：engineer
+- **验收标准**：
+"""
+
+    content = loop._ralph_build_prd_ready_content(Path('/tmp/prd.md'), Path('/tmp/prd.json'), prd, prd_md)
+
+    assert '### 用户故事 1：任务列表展示页面' in content
+    assert '### 用户故事 2：新增任务功能' in content
+    assert '页面加载时从数据库获取所有任务' in content
+    assert '提供任务输入表单' in content
+
+
 def test_ralph_prompt_constraints_enforce_required_roles_from_prompt():
     loop = AgentLoop(bus=MessageBus(), adapter=_DummyAdapter(), model='glm-5', streaming=False)
     prd = {
@@ -299,3 +356,133 @@ def test_ralph_prompt_constraints_enforce_required_roles_from_prompt():
     assert 'writer' in roles
     assert 'qa' in roles
     assert constrained['stories'][2]['role'] == 'qa'
+
+
+def test_ralph_prompt_constraints_concretize_flask_json_todo_stories():
+    loop = AgentLoop(bus=MessageBus(), adapter=_DummyAdapter(), model='glm-5', streaming=False)
+    prd = {
+        'project': 'Todo List Web Application',
+        'stories': [
+            {'id': 'US-001', 'title': '项目初始化与基础架构', 'description': '初始化项目', 'acceptanceCriteria': ['Typecheck passes'], 'role': 'engineer'},
+            {'id': 'US-002', 'title': '新增任务功能', 'description': '新增任务', 'acceptanceCriteria': ['Typecheck passes'], 'role': 'engineer'},
+            {'id': 'US-003', 'title': '完成任务功能', 'description': '完成任务', 'acceptanceCriteria': ['Typecheck passes'], 'role': 'engineer'},
+            {'id': 'US-004', 'title': '删除任务功能', 'description': '删除任务', 'acceptanceCriteria': ['Typecheck passes'], 'role': 'engineer'},
+        ],
+    }
+    prd['userStories'] = list(prd['stories'])
+
+    constrained = loop._ralph_apply_prompt_constraints_to_prd(
+        prd,
+        prompt='做一个 Todo List Web 应用，使用 Python 3 + uv，输出到 /Users/LokiTina/.iflow-bot/workspace/project/todolist，支持新增、完成、删除任务。',
+        qa_block='必须使用 Flask + JSON 文件持久化；不要注册登录；界面极简。',
+    )
+
+    story1 = constrained['stories'][0]
+    assert story1['title'] == '项目初始化与基础架构'
+    assert '输出目录: /Users/LokiTina/.iflow-bot/workspace/project/todolist' in story1['acceptanceCriteria']
+    assert '必须包含文件: pyproject.toml、app.py、templates/index.html、todos.json' in story1['acceptanceCriteria']
+    assert '启动命令: uv run python app.py' in story1['acceptanceCriteria']
+    assert 'Tests pass' in story1['acceptanceCriteria']
+
+    story2 = constrained['stories'][1]
+    assert '提交表单到路由 POST /add' in story2['acceptanceCriteria']
+    assert 'Tests pass' in story2['acceptanceCriteria']
+
+    story3 = constrained['stories'][2]
+    assert '提交到路由 POST /complete/<id>' in story3['acceptanceCriteria']
+    assert 'Tests pass' in story3['acceptanceCriteria']
+
+    story4 = constrained['stories'][3]
+    assert '提交到路由 POST /delete/<id>' in story4['acceptanceCriteria']
+    assert 'Tests pass' in story4['acceptanceCriteria']
+
+
+def test_ralph_prompt_constraints_canonicalize_flask_json_todo_story_list():
+    loop = AgentLoop(bus=MessageBus(), adapter=_DummyAdapter(), model='glm-5', streaming=False)
+    prd = {
+        'project': 'Todo List Web Application',
+        'stories': [
+            {'id': 'US-001', 'title': '项目初始化与基础架构', 'description': '初始化项目', 'acceptanceCriteria': ['Typecheck passes'], 'role': 'engineer'},
+            {'id': 'US-002', 'title': '新增任务功能', 'description': '新增任务', 'acceptanceCriteria': ['Typecheck passes'], 'role': 'engineer'},
+            {'id': 'US-003', 'title': '新增任务功能', 'description': '重复的新增任务', 'acceptanceCriteria': ['Typecheck passes'], 'role': 'engineer'},
+            {'id': 'US-004', 'title': '完成任务功能', 'description': '完成任务', 'acceptanceCriteria': ['Typecheck passes'], 'role': 'engineer'},
+            {'id': 'US-005', 'title': '删除任务功能', 'description': '删除任务', 'acceptanceCriteria': ['Typecheck passes'], 'role': 'engineer'},
+            {'id': 'US-006', 'title': 'Web 界面集成与整体测试', 'description': '泛化故事', 'acceptanceCriteria': ['Typecheck passes'], 'role': 'engineer'},
+        ],
+    }
+    prd['userStories'] = list(prd['stories'])
+
+    constrained = loop._ralph_apply_prompt_constraints_to_prd(
+        prd,
+        prompt='做一个 Todo List Web 应用，使用 Python 3 + uv，输出到 /Users/LokiTina/.iflow-bot/workspace/project/todolist，支持新增、完成、删除任务。',
+        qa_block='必须使用 Flask + JSON 文件持久化；不要注册登录；界面极简。',
+    )
+
+    titles = [story['title'] for story in constrained['stories']]
+    assert titles == [
+        '项目初始化与基础架构',
+        '新增任务功能',
+        '完成任务功能',
+        '删除任务功能',
+    ]
+    assert len(constrained['stories']) == 4
+    assert constrained['stories'] == constrained['userStories']
+
+
+def test_ralph_prompt_constraints_default_todo_stack_to_flask_json_when_unspecified():
+    loop = AgentLoop(bus=MessageBus(), adapter=_DummyAdapter(), model='glm-5', streaming=False)
+    prd = {
+        'project': 'Todo List Web 应用',
+        'stories': [
+            {'id': 'US-001', 'title': '项目初始化与基础结构', 'description': '初始化项目', 'acceptanceCriteria': ['Typecheck passes'], 'role': 'engineer'},
+            {'id': 'US-002', 'title': '数据模型与存储层', 'description': '建立 SQLite 存储层', 'acceptanceCriteria': ['Typecheck passes'], 'role': 'engineer'},
+            {'id': 'US-003', 'title': '后端 API 路由', 'description': '实现 CRUD API', 'acceptanceCriteria': ['Typecheck passes'], 'role': 'engineer'},
+            {'id': 'US-004', 'title': 'Web 界面 - 任务列表展示', 'description': '展示列表', 'acceptanceCriteria': ['Typecheck passes'], 'role': 'engineer'},
+            {'id': 'US-005', 'title': 'Web 界面 - 新增任务', 'description': '新增任务', 'acceptanceCriteria': ['Typecheck passes'], 'role': 'engineer'},
+            {'id': 'US-006', 'title': 'Web 界面 - 完成任务', 'description': '完成任务', 'acceptanceCriteria': ['Typecheck passes'], 'role': 'engineer'},
+            {'id': 'US-007', 'title': 'Web 界面 - 删除任务', 'description': '删除任务', 'acceptanceCriteria': ['Typecheck passes'], 'role': 'engineer'},
+            {'id': 'US-008', 'title': '应用集成验证', 'description': '整体验证', 'acceptanceCriteria': ['Typecheck passes'], 'role': 'engineer'},
+        ],
+    }
+    prd['userStories'] = list(prd['stories'])
+
+    constrained = loop._ralph_apply_prompt_constraints_to_prd(
+        prd,
+        prompt='做一个 Todo List Web 应用，使用 Python 3 + uv，输出到 /Users/LokiTina/.iflow-bot/workspace/project/todolist，支持新增、完成、删除任务。',
+        qa_block='目标是产出一个可运行的 Todo List Web 应用；交付物是完整项目代码，输出到 /Users/LokiTina/.iflow-bot/workspace/project/todolist；约束：使用 Python 3 + uv，允许修改该输出目录内文件，不要改其他环境或无关目录。',
+    )
+
+    titles = [story['title'] for story in constrained['stories']]
+    assert titles == [
+        '项目初始化与基础架构',
+        '新增任务功能',
+        '完成任务功能',
+        '删除任务功能',
+    ]
+    assert len(constrained['stories']) == 4
+    assert '提交表单到路由 POST /add' in constrained['stories'][1]['acceptanceCriteria']
+    assert '提交到路由 POST /complete/<id>' in constrained['stories'][2]['acceptanceCriteria']
+    assert '提交到路由 POST /delete/<id>' in constrained['stories'][3]['acceptanceCriteria']
+
+
+def test_ralph_prompt_constraints_respect_explicit_fastapi_sqlite_choices():
+    loop = AgentLoop(bus=MessageBus(), adapter=_DummyAdapter(), model='glm-5', streaming=False)
+    prd = {
+        'project': 'Todo List Web 应用',
+        'stories': [
+            {'id': 'US-001', 'title': '项目初始化与基础结构', 'description': '初始化项目', 'acceptanceCriteria': ['Typecheck passes'], 'role': 'engineer'},
+            {'id': 'US-002', 'title': '数据模型与存储层', 'description': '建立 SQLite 存储层', 'acceptanceCriteria': ['Typecheck passes'], 'role': 'engineer'},
+        ],
+    }
+    prd['userStories'] = list(prd['stories'])
+
+    constrained = loop._ralph_apply_prompt_constraints_to_prd(
+        prd,
+        prompt='做一个 Todo List Web 应用，使用 Python 3 + uv，支持新增、完成、删除任务。',
+        qa_block='必须使用 FastAPI + SQLite；前后端分离不是必须。',
+    )
+
+    assert [story['title'] for story in constrained['stories']] == [
+        '项目初始化与基础结构',
+        '数据模型与存储层',
+    ]

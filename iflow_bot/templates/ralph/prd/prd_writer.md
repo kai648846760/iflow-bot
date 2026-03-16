@@ -6,6 +6,10 @@ Input prompt:
 Clarifying questions and answers:
 {qa_block}
 
+If `Authoritative selections` are present, they are binding user decisions.
+Do not replace them with inferred alternatives.
+The PRD must match those selections exactly.
+
 Write a PRD in Markdown with these sections:
 - Title
 - Introduction

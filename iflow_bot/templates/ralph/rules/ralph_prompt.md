@@ -54,6 +54,9 @@ If you discover reusable patterns, add them to the top "## Codebase Patterns" se
   - If `uv run <tool>` triggers project build/editable-install errors, rerun the verification with `uv run --no-project <tool>` or the existing virtualenv tool binary.
   - If imports are missing during typecheck or tests, install/sync the required dependencies first, then rerun verification.
   - If Hatchling reports it cannot determine which files to ship and your code lives under `app/`, add explicit wheel package config in `pyproject.toml`, then rerun `uv sync` or the verification command.
+  - For Flask routes that return `render_template(...)`, `redirect(...)`, or `jsonify(...)`, do not use an overly narrow `str` or `tuple[str, int]` annotation; use a response-compatible return type such as `ResponseReturnValue`.
+  - If `json.load(...)` or another untyped API feeds a typed return value, normalize/validate it or use an explicit `cast(...)` before returning so mypy does not report `Returning Any`.
+  - If you read `dict[str, object]` or other untyped mappings, narrow values with `isinstance(...)` or equivalent validation before passing them into `int()`, `float()`, or other typed constructors.
 - Before reporting completion, do a two-stage self-review:
   1) Spec compliance check (acceptance criteria).
   2) Code quality check (readability, safety, maintainability).
