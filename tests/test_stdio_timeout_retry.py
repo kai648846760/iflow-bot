@@ -51,6 +51,29 @@ class _HangingAuthClient:
         return None
 
 
+class _CountingHangingAuthClient:
+    def __init__(self):
+        self.started = 0
+        self.initialized = 0
+        self.auth_calls = 0
+
+    async def start(self):
+        self.started += 1
+
+    async def initialize(self):
+        self.initialized += 1
+
+    async def authenticate(self, method_id="iflow"):
+        self.auth_calls += 1
+        await asyncio.Future()
+
+    async def is_connected(self):
+        return True
+
+    async def stop(self):
+        return None
+
+
 class _DisconnectedClient:
     def __init__(self):
         self.stop_called = False
@@ -145,6 +168,26 @@ async def test_connect_does_not_block_long_on_auth_timeout(tmp_path):
     elapsed = time.perf_counter() - start
 
     assert elapsed < 0.5
+
+
+@pytest.mark.asyncio
+async def test_connect_skips_repeated_auth_timeout_for_same_client(tmp_path):
+    adapter = StdioACPAdapter(workspace=tmp_path, timeout=600)
+    client = _CountingHangingAuthClient()
+    adapter._client = client
+    adapter._auth_timeout_seconds = 0.05
+
+    start = time.perf_counter()
+    await adapter.connect()
+    first_elapsed = time.perf_counter() - start
+
+    start = time.perf_counter()
+    await adapter.connect()
+    second_elapsed = time.perf_counter() - start
+
+    assert first_elapsed < 0.5
+    assert second_elapsed < 0.02
+    assert client.auth_calls == 1
 
 
 @pytest.mark.asyncio

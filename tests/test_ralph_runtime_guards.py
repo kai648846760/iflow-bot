@@ -205,6 +205,19 @@ class _FakeChannelManager:
         await self._channel.send(msg)
 
 
+class _RecordingCommand:
+    name = "/record"
+    aliases: tuple[str, ...] = ()
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, list[str]]] = []
+
+    async def handle(self, ctx, msg: InboundMessage, args: list[str]) -> bool:
+        self.calls.append((msg.content, list(args)))
+        await ctx.reply(f"recorded:{','.join(args)}")
+        return True
+
+
 class _PendingTask:
     def done(self) -> bool:
         return False
@@ -842,6 +855,71 @@ async def test_try_fast_path_routes_natural_language_progress_query_to_ralph_sta
     assert "Ralph 状态: 运行中" in reply
     assert "子角色: 工程" in reply
     assert "阶段: 恢复中（第 2 次）" in reply
+
+
+@pytest.mark.asyncio
+async def test_handle_slash_command_uses_registered_command_handlers(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    bus = MessageBus()
+    channel = _FakeChannel()
+    loop = AgentLoop(
+        bus=bus,
+        adapter=_FakeAdapter(workspace),
+        model="glm-5",
+        streaming=False,
+        channel_manager=_FakeChannelManager(channel),
+    )
+    command = _RecordingCommand()
+    loop._command_registry = {"/record": command}
+
+    handled = await loop._handle_slash_command(
+        InboundMessage(
+            channel="feishu",
+            sender_id="ou_test",
+            chat_id="ou_test",
+            content="/record alpha beta",
+            metadata={"message_id": "m-record", "msg_type": "text"},
+        )
+    )
+
+    assert handled is True
+    assert command.calls == [("/record alpha beta", ["alpha", "beta"])]
+    assert channel.messages
+    assert channel.messages[-1].content == "recorded:alpha,beta"
+
+
+@pytest.mark.asyncio
+async def test_try_fast_path_uses_registered_fast_path_command(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    bus = MessageBus()
+    channel = _FakeChannel()
+    loop = AgentLoop(
+        bus=bus,
+        adapter=_FakeAdapter(workspace),
+        model="glm-5",
+        streaming=False,
+        channel_manager=_FakeChannelManager(channel),
+    )
+    command = _RecordingCommand()
+    loop._command_registry = {"/record": command}
+    loop._fast_path_command_names = {"/record"}
+
+    handled = await loop._try_fast_path(
+        InboundMessage(
+            channel="feishu",
+            sender_id="ou_test",
+            chat_id="ou_test",
+            content="/record fast path",
+            metadata={"message_id": "m-record-fast", "msg_type": "text"},
+        )
+    )
+
+    assert handled is True
+    assert command.calls == [("/record fast path", ["fast", "path"])]
+    assert channel.messages
+    assert channel.messages[-1].content == "recorded:fast,path"
 
 
 def test_ralph_pick_role_overrides_researcher_when_criteria_require_implementation(tmp_path: Path):

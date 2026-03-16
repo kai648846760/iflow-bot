@@ -100,6 +100,67 @@ async def test_loop_different_users_can_run_in_parallel():
 
 
 @pytest.mark.asyncio
+async def test_loop_handles_600_messages_without_crashing_or_serializing_all_users():
+    bus = MessageBus(max_size=1024)
+    adapter = _TrackingAdapter()
+    loop = AgentLoop(bus=bus, adapter=adapter, model='kimi-k2.5', streaming=False)
+
+    messages = []
+    for idx in range(600):
+        chat_id = f'chat-{idx % 20}'
+        sender_id = f'user-{idx % 20}'
+        messages.append(
+            InboundMessage(
+                channel='feishu',
+                sender_id=sender_id,
+                chat_id=chat_id,
+                content=f'msg-{idx}',
+                metadata={'message_id': str(idx)},
+            )
+        )
+
+    await asyncio.gather(*(loop._process_message(msg) for msg in messages))
+
+    # same chat should still be serialized
+    assert all(v == 1 for v in adapter.max_active_per_key.values())
+    # but globally we still allow concurrency across users/chats
+    assert adapter.global_max_active >= 2
+    # outbound replies should all be produced instead of crashing mid-run
+    assert bus.outbound_size == 600
+
+
+@pytest.mark.asyncio
+async def test_run_loop_drains_600_enqueued_messages_without_crashing():
+    bus = MessageBus(max_size=2048)
+    adapter = _TrackingAdapter()
+    loop = AgentLoop(bus=bus, adapter=adapter, model='kimi-k2.5', streaming=False)
+
+    runner = asyncio.create_task(loop.run())
+    try:
+        for idx in range(600):
+            await bus.publish_inbound(
+                InboundMessage(
+                    channel='feishu',
+                    sender_id=f'user-{idx % 20}',
+                    chat_id=f'chat-{idx % 20}',
+                    content=f'msg-{idx}',
+                    metadata={'message_id': f'bulk-{idx}'},
+                )
+            )
+
+        deadline = asyncio.get_running_loop().time() + 20
+        while bus.outbound_size < 600:
+            assert asyncio.get_running_loop().time() < deadline
+            await asyncio.sleep(0.05)
+
+        assert adapter.global_max_active >= 2
+        assert all(v == 1 for v in adapter.max_active_per_key.values())
+    finally:
+        loop.stop()
+        await asyncio.wait_for(runner, timeout=5)
+
+
+@pytest.mark.asyncio
 async def test_feishu_streaming_failure_path_logs(monkeypatch):
     import iflow_bot.channels.feishu as feishu_mod
 

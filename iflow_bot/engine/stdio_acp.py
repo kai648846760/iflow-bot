@@ -23,6 +23,7 @@ import asyncio
 import json
 import platform
 import re
+import time
 import uuid
 from datetime import datetime
 from dataclasses import dataclass, field
@@ -825,6 +826,10 @@ class StdioACPAdapter:
         self._active_compress_trigger_tokens = max(0, int(active_compress_trigger_tokens))
         self._active_compress_budget_tokens = 2200
         self._auth_timeout_seconds = 5.0
+        self._auth_retry_cooldown_seconds = 30.0
+        self._last_auth_attempt_at = 0.0
+        self._last_auth_succeeded: Optional[bool] = None
+        self._last_auth_client_id: Optional[int] = None
         self._session_map_file = Path.home() / ".iflow-bot" / "session_mappings.json"
         self._session_lock = asyncio.Lock()
         self._load_session_map()
@@ -1072,17 +1077,34 @@ TOOLS.md - Your Tools（你的工具）定义了你可以使用的工具列表�
                 await self._client.start()
                 await self._client.initialize()
 
-                auth_timeout = self._auth_timeout_seconds
-                if self.timeout:
-                    auth_timeout = min(auth_timeout, float(self.timeout))
-                try:
-                    authenticated = await asyncio.wait_for(
-                        self._client.authenticate("iflow"),
-                        timeout=auth_timeout,
-                    )
-                except asyncio.TimeoutError:
-                    authenticated = False
-                    logger.warning("StdioACP authentication timeout, continue without auth")
+                now = time.time()
+                current_client_id = id(self._client)
+                authenticated = False
+                should_retry_auth = True
+                if (
+                    self._last_auth_client_id == current_client_id
+                    and self._last_auth_succeeded is False
+                    and (now - self._last_auth_attempt_at) < self._auth_retry_cooldown_seconds
+                ):
+                    should_retry_auth = False
+
+                if should_retry_auth:
+                    auth_timeout = self._auth_timeout_seconds
+                    if self.timeout:
+                        auth_timeout = min(auth_timeout, float(self.timeout))
+                    self._last_auth_attempt_at = now
+                    self._last_auth_client_id = current_client_id
+                    try:
+                        authenticated = await asyncio.wait_for(
+                            self._client.authenticate("iflow"),
+                            timeout=auth_timeout,
+                        )
+                    except asyncio.TimeoutError:
+                        authenticated = False
+                        logger.warning("StdioACP authentication timeout, continue without auth")
+                    self._last_auth_succeeded = bool(authenticated)
+                else:
+                    logger.debug("StdioACP skipping repeated authentication attempt during cooldown")
 
                 if not authenticated:
                     logger.warning("StdioACP authentication failed, some features may not work")
@@ -1094,6 +1116,9 @@ TOOLS.md - Your Tools（你的工具）定义了你可以使用的工具列表�
                 except Exception:
                     pass
                 self._client = None
+                self._last_auth_client_id = None
+                self._last_auth_succeeded = None
+                self._last_auth_attempt_at = 0.0
                 if attempt >= 1:
                     raise StdioACPConnectionError(f"Failed to connect stdio ACP: {exc}") from exc
     
@@ -1101,6 +1126,9 @@ TOOLS.md - Your Tools（你的工具）定义了你可以使用的工具列表�
         if self._client:
             await self._client.stop()
             self._client = None
+        self._last_auth_client_id = None
+        self._last_auth_succeeded = None
+        self._last_auth_attempt_at = 0.0
     
     def _get_session_key(self, channel: str, chat_id: str) -> str:
         return f"{channel}:{chat_id}"
