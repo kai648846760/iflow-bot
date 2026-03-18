@@ -275,3 +275,64 @@ async def test_prompt_does_not_fail_early_when_tool_call_fails_but_prompt_comple
     assert response.stop_reason == StopReason.END_TURN
     assert response.content == "recovered after tool failure"
     assert response.tool_calls[0].status == "failed"
+
+
+@pytest.mark.asyncio
+async def test_prompt_falls_back_to_result_payload_when_chunks_are_absent(tmp_path: Path):
+    client = StdioACPClient(workspace=tmp_path, timeout=1)
+    client._started = True
+    client._process = _FakePromptProcess()
+
+    session_id = "sess-final-only"
+
+    async def feed_result_only():
+        while session_id not in client._session_queues or not client._pending_requests:
+            await asyncio.sleep(0)
+
+        future = next(iter(client._pending_requests.values()))
+        if not future.done():
+            future.set_result(
+                {
+                    "result": {
+                        "stopReason": "end_turn",
+                        "content": [
+                            {"type": "text", "text": "# PRD\n\n- story 1"}
+                        ],
+                    }
+                }
+            )
+
+    feeder = asyncio.create_task(feed_result_only())
+    response = await client.prompt(session_id, "hello", timeout=1)
+    await feeder
+
+    assert response.error is None
+    assert response.stop_reason == StopReason.END_TURN
+    assert response.content == "# PRD\n\n- story 1"
+
+
+@pytest.mark.asyncio
+async def test_connect_skips_repeated_auth_timeout_across_recreated_clients(monkeypatch, tmp_path):
+    adapter = StdioACPAdapter(workspace=tmp_path, timeout=600)
+    first = _CountingHangingAuthClient()
+    second = _CountingHangingAuthClient()
+    adapter._client = first
+    adapter._auth_timeout_seconds = 0.05
+
+    start = time.perf_counter()
+    await adapter.connect()
+    first_elapsed = time.perf_counter() - start
+
+    dead = _DisconnectedClient()
+    adapter._client = dead
+    monkeypatch.setattr("iflow_bot.engine.stdio_acp.StdioACPClient", lambda *args, **kwargs: second)
+
+    start = time.perf_counter()
+    await adapter.connect()
+    second_elapsed = time.perf_counter() - start
+
+    assert first_elapsed < 0.5
+    assert second_elapsed < 0.02
+    assert dead.stop_called is True
+    assert first.auth_calls == 1
+    assert second.auth_calls == 0

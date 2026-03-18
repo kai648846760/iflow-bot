@@ -1027,8 +1027,9 @@ async def _run_gateway(config, verbose: bool = False) -> None:
     # STDIO 模式：启动时预热 ACP（start + initialize + authenticate）
     if mode == "stdio":
         console.print("[cyan]预热 Stdio ACP (initialize + authenticate)...[/cyan]")
+        prewarm_timeout = 12.0
         try:
-            await adapter._get_stdio_adapter()
+            await asyncio.wait_for(adapter._get_stdio_adapter(), timeout=prewarm_timeout)
             console.print(f"[green]{_OK_MARK}[/green] Stdio ACP 预热完成")
         except Exception as e:
             console.print(f"[yellow]Stdio ACP 预热失败，将在首条消息时重试: {e}[/yellow]")

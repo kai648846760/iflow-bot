@@ -281,6 +281,133 @@ def test_ralph_extract_project_dir_from_output_prompt_with_absolute_path(tmp_pat
     assert extracted == "/Users/LokiTina/.iflow-bot/workspace/project/ralph-feishu-local-report"
 
 
+def test_ralph_default_simple_todo_prompt_accepts_sqlite_storage_requirement(tmp_path: Path):
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(tmp_path / "workspace"), model="glm-5", streaming=False)
+
+    prompt = (
+        "做一个 Todo List Web 应用，技术栈限定 Python 3 + uv，输出目录固定为 project/todolist。"
+        "要求：支持新增、完成、删除任务；提供可直接运行的最小 Web 界面；确保跨平台可运行；完成后给出运行与验证说明。"
+    )
+    qa_block = (
+        "1. 目标是交付一个可直接运行的 Todo List Web 应用，范围仅包含新增、完成、删除任务与最小可用 Web 界面。 "
+        "2. 输出交付物为 project/todolist 下完整可运行项目、运行命令、验证说明。 "
+        "3. 约束：技术栈固定 Python 3 + uv；必须跨平台可运行；使用 SQLite 持久化；不要引入不必要的复杂依赖。"
+    )
+
+    assert loop._ralph_is_default_simple_todo_prompt(prompt, qa_block) is True
+
+
+def test_ralph_apply_prompt_constraints_to_prd_uses_canonical_sqlite_todo_stories(tmp_path: Path):
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(tmp_path / "workspace"), model="glm-5", streaming=False)
+
+    prompt = (
+        "做一个 Todo List Web 应用，技术栈限定 Python 3 + uv，输出目录固定为 project/todolist。"
+        "要求：支持新增、完成、删除任务；提供可直接运行的最小 Web 界面；确保跨平台可运行；完成后给出运行与验证说明。"
+    )
+    qa_block = (
+        "1. 目标是交付一个可直接运行的 Todo List Web 应用，范围仅包含新增、完成、删除任务与最小可用 Web 界面。 "
+        "2. 输出交付物为 project/todolist 下完整可运行项目、运行命令、验证说明。 "
+        "3. 约束：技术栈固定 Python 3 + uv；必须跨平台可运行；使用 SQLite 持久化；不要引入不必要的复杂依赖。"
+    )
+    prd = {
+        "stories": [{"id": "US-X", "title": "自由发挥", "description": "bad", "role": "engineer"}],
+        "userStories": [{"id": "US-X", "title": "自由发挥", "description": "bad", "role": "engineer"}],
+    }
+
+    constrained = loop._ralph_apply_prompt_constraints_to_prd(prd, prompt=prompt, qa_block=qa_block)
+    stories = constrained["stories"]
+
+    assert [story["title"] for story in stories] == [
+        "项目初始化与基础架构",
+        "新增任务功能",
+        "完成任务功能",
+        "删除任务功能",
+    ]
+    assert "输出目录: project/todolist" in stories[0]["acceptanceCriteria"]
+    assert "必须包含文件: pyproject.toml、app.py、templates/index.html、todo.db" in stories[0]["acceptanceCriteria"]
+    assert "app.py 作为入口文件（不使用 main.py）" in stories[0]["acceptanceCriteria"]
+    assert "任务写入 SQLite 数据库" in stories[1]["acceptanceCriteria"]
+    assert "提交表单到路由 POST /add" in stories[1]["acceptanceCriteria"]
+
+
+def test_ralph_sanitize_prd_markdown_canonicalizes_sqlite_todo_sections(tmp_path: Path):
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(tmp_path / "workspace"), model="glm-5", streaming=False)
+    prd = {
+        "project": "Todo List Web 应用",
+        "stories": loop._ralph_canonical_flask_json_todo_stories(output_dir="project/todolist", storage_mode="sqlite"),
+    }
+    source = (
+        "# Todo List Web 应用 PRD\n\n"
+        "## 用户故事\n\n"
+        "### 故事 1：旧故事\n- **描述**：旧内容\n\n"
+        "## 技术考量\n\n"
+        "- **目录结构**：\n"
+        "  ```\n"
+        "  project/todolist/\n"
+        "  ├── pyproject.toml\n"
+        "  ├── main.py\n"
+        "  ├── templates/\n"
+        "  │   └── index.html\n"
+        "  └── data.db (运行时生成)\n"
+        "  ```\n"
+        "- 执行 `uv run main.py` 后应用正常启动\n"
+        "- 使用 data.db 保存数据\n"
+    )
+
+    sanitized = loop._ralph_sanitize_prd_markdown(source, prd)
+
+    assert "app.py 作为入口文件（不使用 main.py）" in sanitized
+    assert "启动命令: uv run python app.py" in sanitized
+    assert "todo.db 初始化完成并可写入任务数据" in sanitized
+    assert "├── app.py" in sanitized
+    assert "└── todo.db" in sanitized
+    assert "uv run main.py" not in sanitized
+    assert "data.db (运行时生成)" not in sanitized
+    assert "├── main.py" not in sanitized
+
+
+@pytest.mark.asyncio
+async def test_ralph_create_archives_existing_project_dir_before_new_run(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    bus = MessageBus()
+    adapter = _FakeAdapter(workspace)
+    loop = AgentLoop(bus=bus, adapter=adapter, model="glm-5", streaming=False)
+
+    project_dir = workspace / "project" / "todolist"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "stale.txt").write_text("old", encoding="utf-8")
+
+    async def _fake_generate_questions(prompt: str, run_dir: Path):
+        return ([{"id": 1, "question": "Q1", "options": ["A", "B"]}], "")
+
+    loop._ralph_generate_questions = _fake_generate_questions  # type: ignore[method-assign]
+
+    msg = InboundMessage(
+        channel="feishu",
+        chat_id="ou_test",
+        sender_id="ou_test",
+        content="/ralph 做一个 Todo List Web 应用，技术栈限定 Python 3 + uv，输出目录固定为 project/todolist。",
+    )
+
+    await loop._ralph_create(
+        msg,
+        "做一个 Todo List Web 应用，技术栈限定 Python 3 + uv，输出目录固定为 project/todolist。",
+    )
+
+    current_run = loop._ralph_get_current("ou_test")
+    assert current_run is not None
+    run_dir = loop._ralph_run_dir("ou_test", current_run)
+    state = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+
+    archived = sorted(workspace.glob("project/todolist.bak-*"))
+    assert archived, "expected archived project backup"
+    assert (archived[-1] / "stale.txt").read_text(encoding="utf-8") == "old"
+    assert state["project_dir"] == str(project_dir)
+    assert project_dir.exists()
+    assert not (project_dir / "stale.txt").exists()
+
+
 def test_new_conversation_message_uses_session_language_when_config_is_default_english(tmp_path: Path):
     workspace = tmp_path / "workspace"
     _set_language(workspace, "zh-CN")
@@ -708,6 +835,28 @@ def test_ralph_verification_commands_fall_back_to_uv_with_tool(tmp_path: Path):
     commands = loop._ralph_verification_commands(project_dir, "pytest", "-q")
 
     assert commands == [["uv", "run", "--with", "pytest", "--no-project", "pytest", "-q"]]
+
+
+def test_ralph_verification_commands_use_typescript_typecheck_for_frontend_project(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    project_dir = workspace / "project" / "demo"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "package.json").write_text(
+        '{"name":"demo","scripts":{"typecheck":"tsc --noEmit"}}\n',
+        encoding="utf-8",
+    )
+    (project_dir / "tsconfig.json").write_text('{"compilerOptions":{"strict":true}}\n', encoding="utf-8")
+    bin_dir = project_dir / "node_modules" / ".bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    (bin_dir / "tsc").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    os.chmod(bin_dir / "tsc", 0o755)
+
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(workspace), model="glm-5", streaming=False)
+    commands = loop._ralph_verification_commands(project_dir, "mypy", ".")
+
+    assert commands[0] == [str(bin_dir / "tsc"), "--noEmit"]
+    assert ["npm", "run", "typecheck"] in commands
+    assert ["npm", "exec", "--", "tsc", "--noEmit"] in commands
 
 
 def test_ralph_autofinalize_completion_guard_rejects_bootstrap_story_without_structure(tmp_path: Path):
@@ -1264,6 +1413,139 @@ async def test_ralph_verification_requires_pytest_when_story_demands_tests(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_ralph_verification_passed_creates_declared_readme_before_uv_commands(monkeypatch, tmp_path: Path):
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(tmp_path / "workspace"), model="glm-5", streaming=False)
+    project_dir = tmp_path / "workspace" / "project" / "demo"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "pyproject.toml").write_text(
+        "[project]\n"
+        "name='demo'\n"
+        "version='0.1.0'\n"
+        "readme='README.md'\n\n"
+        "[project.optional-dependencies]\n"
+        "dev=['pytest','mypy']\n",
+        encoding="utf-8",
+    )
+    (project_dir / "src").mkdir(parents=True, exist_ok=True)
+    (project_dir / "src" / "main.py").write_text("print('ok')\n", encoding="utf-8")
+    (project_dir / "tests").mkdir(parents=True, exist_ok=True)
+    (project_dir / "tests" / "test_main.py").write_text("def test_ok() -> None:\n    assert True\n", encoding="utf-8")
+
+    calls: list[tuple[str, ...]] = []
+
+    class _Proc:
+        def __init__(self, cmd: tuple[str, ...]):
+            self.cmd = cmd
+            self.returncode = 0
+
+        async def communicate(self):
+            if self.cmd[-2:] == ("pytest", "-q"):
+                return (b"1 passed in 0.03s", None)
+            return (b"Success: no issues found in 1 source file", None)
+
+    async def _fake_create_subprocess_exec(*cmd, **kwargs):
+        assert (project_dir / "README.md").exists()
+        calls.append(tuple(cmd))
+        return _Proc(tuple(cmd))
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+
+    passed = await loop._ralph_verification_passed(
+        project_dir,
+        {"acceptanceCriteria": ["实现功能", "Typecheck passes", "Tests pass"]},
+    )
+
+    assert passed is True
+    assert (project_dir / "README.md").exists()
+    assert calls == [
+        ("uv", "run", "--extra", "dev", "mypy", "src"),
+        ("uv", "run", "--extra", "dev", "pytest", "-q"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ralph_collect_verification_evidence_creates_declared_readme_before_uv_commands(monkeypatch, tmp_path: Path):
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(tmp_path / "workspace"), model="glm-5", streaming=False)
+    project_dir = tmp_path / "workspace" / "project" / "demo"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "pyproject.toml").write_text(
+        "[project]\n"
+        "name='demo'\n"
+        "version='0.1.0'\n"
+        "readme='README.md'\n\n"
+        "[project.optional-dependencies]\n"
+        "dev=['pytest','mypy']\n",
+        encoding="utf-8",
+    )
+    (project_dir / "src").mkdir(parents=True, exist_ok=True)
+    (project_dir / "src" / "main.py").write_text("print('ok')\n", encoding="utf-8")
+    (project_dir / "tests").mkdir(parents=True, exist_ok=True)
+    (project_dir / "tests" / "test_main.py").write_text("def test_ok() -> None:\n    assert True\n", encoding="utf-8")
+
+    calls: list[tuple[str, ...]] = []
+
+    class _Proc:
+        def __init__(self, cmd: tuple[str, ...]):
+            self.cmd = cmd
+            self.returncode = 0
+
+        async def communicate(self):
+            if self.cmd[-2:] == ("pytest", "-q"):
+                return (b"1 passed in 0.03s", None)
+            return (b"Success: no issues found in 1 source file", None)
+
+    async def _fake_create_subprocess_exec(*cmd, **kwargs):
+        assert (project_dir / "README.md").exists()
+        calls.append(tuple(cmd))
+        return _Proc(tuple(cmd))
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+
+    evidence = await loop._ralph_collect_verification_evidence(
+        project_dir,
+        {"acceptanceCriteria": ["实现功能", "Typecheck passes", "Tests pass"]},
+    )
+
+    assert (project_dir / "README.md").exists()
+    assert "Success: no issues found in 1 source file" in evidence
+    assert "1 passed in 0.03s" in evidence
+    assert calls == [
+        ("uv", "run", "--extra", "dev", "mypy", "src"),
+        ("uv", "run", "--extra", "dev", "pytest", "-q"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ralph_prepare_and_recheck_verification_retries_after_prepare(monkeypatch, tmp_path: Path):
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(tmp_path / "workspace"), model="glm-5", streaming=False)
+    project_dir = tmp_path / "workspace" / "project" / "demo"
+    project_dir.mkdir(parents=True, exist_ok=True)
+
+    calls: list[str] = []
+
+    async def _fake_verify(self, project_dir: Path, story: dict) -> bool:
+        calls.append("verify")
+        return (project_dir / "README.md").exists()
+
+    async def _fake_prepare(self, project_dir: Path, story: dict) -> str:
+        calls.append("prepare")
+        (project_dir / "README.md").write_text("# Demo\n", encoding="utf-8")
+        return "Created missing README.md"
+
+    monkeypatch.setattr(AgentLoop, "_ralph_verification_passed", _fake_verify)
+    monkeypatch.setattr(AgentLoop, "_ralph_prepare_typecheck_environment", _fake_prepare)
+
+    passed, prep_evidence = await loop._ralph_prepare_and_recheck_verification(
+        project_dir=project_dir,
+        story={"acceptanceCriteria": ["Typecheck passes", "Tests pass"]},
+    )
+
+    assert passed is True
+    assert prep_evidence == "Created missing README.md"
+    assert calls == ["verify", "prepare", "verify"]
+
+
+@pytest.mark.asyncio
 async def test_ralph_collect_verification_evidence_prefers_pytest_failure_over_mypy_success(tmp_path: Path):
     loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(tmp_path / "workspace"), model="glm-5", streaming=False)
     project_dir = tmp_path / "workspace" / "project" / "demo"
@@ -1354,6 +1636,96 @@ async def test_ralph_collect_verification_evidence_reports_semantic_acceptance_g
     assert "Missing todo persistence write path" in evidence
 
 
+async def test_ralph_collect_verification_evidence_accepts_sqlite_todo_persistence(tmp_path: Path):
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(tmp_path / "workspace"), model="glm-5", streaming=False)
+    project_dir = tmp_path / "workspace" / "project" / "demo"
+    project_dir.mkdir(parents=True, exist_ok=True)
+
+    (project_dir / "pyproject.toml").write_text(
+        "[project]\nname='demo'\nversion='0.1.0'\nreadme='README.md'\n\n"
+        "[project.optional-dependencies]\ndev=['pytest','mypy']\n",
+        encoding="utf-8",
+    )
+    (project_dir / "README.md").write_text("# demo\n", encoding="utf-8")
+
+    venv_bin = project_dir / ".venv" / "bin"
+    venv_bin.mkdir(parents=True, exist_ok=True)
+    mypy_bin = venv_bin / "mypy"
+    mypy_bin.write_text("#!/bin/sh\necho 'Success: no issues found in 1 source file'\nexit 0\n", encoding="utf-8")
+    mypy_bin.chmod(0o755)
+    pytest_bin = venv_bin / "pytest"
+    pytest_bin.write_text("#!/bin/sh\necho '.\\n1 passed in 0.03s'\nexit 0\n", encoding="utf-8")
+    pytest_bin.chmod(0o755)
+
+    (project_dir / "templates").mkdir(parents=True, exist_ok=True)
+    (project_dir / "tests").mkdir(parents=True, exist_ok=True)
+    (project_dir / "templates" / "index.html").write_text(
+        '<form action="/add" method="post"><input name="content"><button type="submit">add</button></form>'
+        '<form action="/complete/1" method="post"><button>complete</button></form>'
+        '<form action="/delete/1" method="post"><button>delete</button></form>',
+        encoding="utf-8",
+    )
+    (project_dir / "app.py").write_text(
+        "import sqlite3\n"
+        "from pathlib import Path\n"
+        "from flask import Flask, render_template, request, redirect, url_for\n"
+        "app = Flask(__name__)\n"
+        "DATABASE = Path(__file__).parent / 'todo.db'\n"
+        "def get_db():\n"
+        "    return sqlite3.connect(DATABASE)\n"
+        "def save_task(content: str) -> None:\n"
+        "    conn = get_db()\n"
+        "    conn.execute('create table if not exists tasks (id integer primary key, content text, completed integer default 0)')\n"
+        "    conn.execute('insert into tasks (content, completed) values (?, 0)', (content,))\n"
+        "    conn.commit()\n"
+        "    conn.close()\n"
+        "@app.route('/')\n"
+        "def index():\n"
+        "    return render_template('index.html')\n"
+        "@app.route('/add', methods=['POST'])\n"
+        "def add():\n"
+        "    save_task(request.form.get('content', ''))\n"
+        "    return redirect(url_for('index'))\n"
+        "@app.route('/complete/<int:todo_id>', methods=['POST'])\n"
+        "def complete(todo_id: int):\n"
+        "    conn = get_db()\n"
+        "    conn.execute('update tasks set completed = 1 - completed where id = ?', (todo_id,))\n"
+        "    conn.commit()\n"
+        "    conn.close()\n"
+        "    return redirect(url_for('index'))\n"
+        "@app.route('/delete/<int:todo_id>', methods=['POST'])\n"
+        "def delete(todo_id: int):\n"
+        "    conn = get_db()\n"
+        "    conn.execute('delete from tasks where id = ?', (todo_id,))\n"
+        "    conn.commit()\n"
+        "    conn.close()\n"
+        "    return redirect(url_for('index'))\n",
+        encoding="utf-8",
+    )
+    (project_dir / "tests" / "test_app.py").write_text("def test_ok() -> None:\n    assert True\n", encoding="utf-8")
+    (project_dir / "todo.db").write_bytes(b"sqlite")
+
+    evidence = await loop._ralph_collect_verification_evidence(
+        project_dir,
+        {
+            "id": "US-002",
+            "title": "新增任务功能",
+            "role": "engineer",
+            "acceptanceCriteria": [
+                "首页包含输入框和提交按钮",
+                "提交表单到路由 POST /add",
+                "任务写入 SQLite 数据库",
+                "提交到路由 POST /complete/<id>",
+                "SQLite 数据库中删除对应记录",
+                "Tests pass",
+                "Typecheck passes",
+            ],
+        },
+    )
+
+    assert "Missing todo persistence write path" not in evidence
+
+
 def test_ralph_ensure_hatchling_wheel_packages_for_app_project(tmp_path: Path):
     loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(tmp_path / "workspace"), model="glm-5", streaming=False)
     project_dir = tmp_path / "workspace" / "project" / "demo"
@@ -1382,6 +1754,443 @@ def test_ralph_verification_commands_include_windows_venv_scripts(tmp_path: Path
     commands = loop._ralph_verification_commands(project_dir, "mypy", ".")
 
     assert commands[0] == [str(scripts_dir / "mypy.exe"), "."]
+
+
+@pytest.mark.asyncio
+async def test_ralph_verification_passed_accepts_frontend_typescript_project(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    project_dir = workspace / "project" / "demo"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "package.json").write_text(
+        '{"name":"demo","scripts":{"typecheck":"tsc --noEmit"}}\n',
+        encoding="utf-8",
+    )
+    (project_dir / "tsconfig.json").write_text('{"compilerOptions":{"strict":true}}\n', encoding="utf-8")
+    (project_dir / "app.ts").write_text("const value: string = 'ok';\n", encoding="utf-8")
+    bin_dir = project_dir / "node_modules" / ".bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    (bin_dir / "tsc").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    os.chmod(bin_dir / "tsc", 0o755)
+
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(workspace), model="glm-5", streaming=False)
+
+    passed = await loop._ralph_verification_passed(
+        project_dir=project_dir,
+        story={"role": "engineer", "title": "新增 Todo 项", "acceptanceCriteria": ["Typecheck passes"]},
+    )
+
+    assert passed is True
+
+
+def test_ralph_story_requires_typecheck_false_for_static_frontend_story(tmp_path: Path):
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(tmp_path / "workspace"), model="glm-5", streaming=False)
+
+    story = {
+        "role": "engineer",
+        "title": "项目初始化与基础架构",
+        "description": "搭建纯前端项目基础架构，浏览器直接运行，使用 LocalStorage。",
+        "acceptanceCriteria": [
+            "包含 index.html、style.css、app.js 三个核心文件",
+            "任务自动保存到 LocalStorage",
+            "Typecheck passes",
+        ],
+    }
+
+    assert loop._ralph_story_requires_typecheck(story) is False
+
+
+def test_ralph_story_requires_typecheck_false_for_story_in_static_frontend_project(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    project_dir = workspace / "project" / "demo"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "index.html").write_text(
+        '<!doctype html><input id="taskInput"><button id="addBtn">添加</button><ul id="taskList"></ul><script src="app.js"></script>',
+        encoding="utf-8",
+    )
+    (project_dir / "style.css").write_text("body { color: #111; }\n", encoding="utf-8")
+    (project_dir / "app.js").write_text("function addTask() { return true; }\n", encoding="utf-8")
+
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(workspace), model="glm-5", streaming=False)
+
+    story = {
+        "role": "engineer",
+        "title": "新增任务功能",
+        "description": "作为一名用户，我希望能够输入任务名称并添加到列表中，以便记录我需要完成的事项。",
+        "acceptanceCriteria": [
+            "提供输入框和添加按钮",
+            "点击添加按钮或按回车键可添加任务",
+            "任务显示在列表中",
+            "添加后输入框自动清空",
+            "Typecheck passes",
+        ],
+    }
+
+    assert loop._ralph_story_requires_typecheck(story, project_dir) is False
+
+
+def test_ralph_story_requires_tests_false_for_story_in_static_frontend_project(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    project_dir = workspace / "project" / "demo"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "index.html").write_text(
+        '<!doctype html><input id="taskInput"><button id="addBtn">添加</button><ul id="taskList"></ul><script>localStorage.getItem("todos")</script>',
+        encoding="utf-8",
+    )
+
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(workspace), model="glm-5", streaming=False)
+
+    story = {
+        "role": "qa",
+        "title": "页面加载时恢复数据",
+        "description": "作为用户，我希望刷新页面后能看到之前的待办事项，以便继续管理我的任务。",
+        "acceptanceCriteria": [
+            "页面加载时自动从 localStorage 读取历史数据",
+            "正确恢复所有待办事项及其完成状态",
+            "如果 localStorage 无数据，显示空列表",
+            "Tests pass",
+        ],
+    }
+
+    assert loop._ralph_story_requires_tests(story, project_dir) is False
+
+
+def test_ralph_normalize_story_strips_typecheck_for_static_frontend_story(tmp_path: Path):
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(tmp_path / "workspace"), model="glm-5", streaming=False)
+
+    normalized = loop._ralph_normalize_story(
+        {
+            "role": "engineer",
+            "title": "项目初始化与基础架构",
+            "description": "搭建纯前端项目基础架构，浏览器直接运行，使用 LocalStorage。",
+            "acceptanceCriteria": [
+                "包含 index.html、style.css、app.js 三个核心文件",
+                "任务自动保存到 LocalStorage",
+                "Typecheck passes",
+            ],
+        },
+        1,
+    )
+
+    assert "Typecheck passes" not in normalized["acceptanceCriteria"]
+
+
+@pytest.mark.asyncio
+async def test_ralph_verification_passed_accepts_static_frontend_qa_story_without_pytest(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    project_dir = workspace / "project" / "demo"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "index.html").write_text(
+        """
+        <!doctype html>
+        <body>
+          <ul id="todoList"></ul>
+          <div id="emptyState" style="display:none">空</div>
+          <script>
+            const todos = JSON.parse(localStorage.getItem('todos') || '[]');
+            const list = document.getElementById('todoList');
+            const empty = document.getElementById('emptyState');
+            if (todos.length === 0) {
+              empty.style.display = 'block';
+            } else {
+              list.innerHTML = todos.map(todo => `<li class="todo-item${todo.completed ? ' completed' : ''}"><span class="todo-text">${todo.text}</span></li>`).join('');
+            }
+          </script>
+        </body>
+        """,
+        encoding="utf-8",
+    )
+
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(workspace), model="glm-5", streaming=False)
+
+    passed = await loop._ralph_verification_passed(
+        project_dir=project_dir,
+        story={
+            "role": "qa",
+            "title": "页面加载时恢复数据",
+            "description": "作为用户，我希望刷新页面后能看到之前的待办事项，以便继续管理我的任务。应用采用纯前端实现，浏览器可直接运行，无需后端。",
+            "acceptanceCriteria": [
+                "页面加载时自动从 localStorage 读取历史数据",
+                "正确恢复所有待办事项及其完成状态",
+                "如果 localStorage 无数据，显示空列表",
+                "Tests pass",
+            ],
+        },
+    )
+
+    assert passed is True
+
+
+@pytest.mark.asyncio
+async def test_ralph_verification_passed_accepts_static_frontend_story_without_python_tooling(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    project_dir = workspace / "project" / "demo"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "index.html").write_text(
+        '<!doctype html><link rel="stylesheet" href="style.css"><script src="app.js"></script>',
+        encoding="utf-8",
+    )
+    (project_dir / "style.css").write_text("body { color: #111; }\n", encoding="utf-8")
+    (project_dir / "app.js").write_text(
+        "document.addEventListener('DOMContentLoaded', () => localStorage.getItem('todos'));\n",
+        encoding="utf-8",
+    )
+
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(workspace), model="glm-5", streaming=False)
+
+    passed = await loop._ralph_verification_passed(
+        project_dir=project_dir,
+        story={
+            "role": "engineer",
+            "title": "项目初始化与基础架构",
+            "description": "搭建纯前端项目基础架构，浏览器直接运行，使用 LocalStorage。",
+            "acceptanceCriteria": [
+                "包含 index.html、style.css、app.js 三个核心文件",
+                "任务自动保存到 LocalStorage",
+                "Typecheck passes",
+            ],
+        },
+    )
+
+    assert passed is True
+
+
+@pytest.mark.asyncio
+async def test_ralph_verification_passed_accepts_story_in_static_frontend_project_without_python_tooling(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    project_dir = workspace / "project" / "demo"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "index.html").write_text(
+        """
+        <!doctype html>
+        <link rel="stylesheet" href="style.css">
+        <input id="taskInput">
+        <button id="addBtn">添加</button>
+        <ul id="taskList"></ul>
+        <script src="app.js"></script>
+        """,
+        encoding="utf-8",
+    )
+    (project_dir / "style.css").write_text("body { color: #111; }\n", encoding="utf-8")
+    (project_dir / "app.js").write_text(
+        """
+        const taskInput = document.getElementById('taskInput');
+        const taskList = document.getElementById('taskList');
+        const addBtn = document.getElementById('addBtn');
+        function addTask() {
+          const li = document.createElement('li');
+          li.textContent = taskInput.value;
+          taskList.appendChild(li);
+          taskInput.value = '';
+        }
+        addBtn.addEventListener('click', addTask);
+        taskInput.addEventListener('keydown', (event) => {
+          if (event.key === 'Enter') addTask();
+        });
+        """,
+        encoding="utf-8",
+    )
+
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(workspace), model="glm-5", streaming=False)
+
+    passed = await loop._ralph_verification_passed(
+        project_dir=project_dir,
+        story={
+            "role": "engineer",
+            "title": "新增任务功能",
+            "description": "作为一名用户，我希望能够输入任务名称并添加到列表中，以便记录我需要完成的事项。",
+            "acceptanceCriteria": [
+                "提供输入框和添加按钮",
+                "点击添加按钮或按回车键可添加任务",
+                "任务显示在列表中",
+                "添加后输入框自动清空",
+                "Typecheck passes",
+            ],
+        },
+    )
+
+    assert passed is True
+
+
+def test_ralph_semantic_acceptance_gaps_do_not_treat_autocomplete_as_completion_control(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    project_dir = workspace / "project" / "demo"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "index.html").write_text(
+        """
+        <!doctype html>
+        <link rel="stylesheet" href="style.css">
+        <input id="taskInput" autocomplete="off">
+        <button id="addBtn">添加</button>
+        <ul id="taskList"></ul>
+        <script src="app.js"></script>
+        """,
+        encoding="utf-8",
+    )
+    (project_dir / "style.css").write_text(".task-item.completed { color: #999; }\n", encoding="utf-8")
+    (project_dir / "app.js").write_text("function addTask() { return true; }\n", encoding="utf-8")
+
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(workspace), model="glm-5", streaming=False)
+
+    gaps = loop._ralph_semantic_acceptance_gaps(
+        project_dir,
+        {
+            "role": "engineer",
+            "title": "完成任务功能",
+            "description": "作为一名用户，我希望能够标记任务为已完成，以便区分待办和已办事项。",
+            "acceptanceCriteria": [
+                "每个任务有完成按钮（复选框或按钮）",
+                "点击后任务显示为已完成状态（如划线或变灰）",
+                "可切换完成/未完成状态",
+            ],
+        },
+    )
+
+    assert "Missing completion control in UI" in gaps
+
+
+def test_ralph_semantic_acceptance_gaps_accept_dynamic_js_completion_and_delete_controls(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    project_dir = workspace / "project" / "demo"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "index.html").write_text(
+        """
+        <!doctype html>
+        <link rel="stylesheet" href="style.css">
+        <input id="taskInput">
+        <button id="addBtn">添加</button>
+        <ul id="taskList"></ul>
+        <script src="app.js"></script>
+        """,
+        encoding="utf-8",
+    )
+    (project_dir / "style.css").write_text(".task-item.completed { color: #999; }\n", encoding="utf-8")
+    (project_dir / "app.js").write_text(
+        """
+        function renderTask(task) {
+          const item = document.createElement('li');
+          const toggleBtn = document.createElement('button');
+          toggleBtn.textContent = '完成';
+          toggleBtn.className = 'complete-btn';
+          toggleBtn.addEventListener('click', () => item.classList.toggle('completed'));
+          const deleteBtn = document.createElement('button');
+          deleteBtn.textContent = '删除';
+          deleteBtn.className = 'delete-btn';
+          deleteBtn.addEventListener('click', () => item.remove());
+          item.append(toggleBtn, deleteBtn);
+          return item;
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(workspace), model="glm-5", streaming=False)
+
+    gaps = loop._ralph_semantic_acceptance_gaps(
+        project_dir,
+        {
+            "role": "engineer",
+            "title": "任务交互功能",
+            "description": "支持完成与删除任务。",
+            "acceptanceCriteria": [
+                "每个任务有完成按钮（复选框或按钮）",
+                "点击后任务显示为已完成状态（如划线或变灰）",
+                "可切换完成/未完成状态",
+                "每个任务有删除按钮",
+                "点击删除按钮后任务从列表中移除",
+            ],
+        },
+    )
+
+    assert "Missing completion control in UI" not in gaps
+    assert "Missing delete control in UI" not in gaps
+
+
+def test_ralph_semantic_acceptance_gaps_allow_single_file_static_frontend_artifact(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    project_dir = workspace / "project" / "demo"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "index.html").write_text(
+        """
+        <!doctype html>
+        <html>
+          <body>
+            <input id="todoInput" autocomplete="off">
+            <button id="addBtn">添加</button>
+            <ul id="todoList"></ul>
+            <script>
+              function addTodo() {
+                return true;
+              }
+            </script>
+          </body>
+        </html>
+        """,
+        encoding="utf-8",
+    )
+
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(workspace), model="glm-5", streaming=False)
+
+    gaps = loop._ralph_semantic_acceptance_gaps(
+        project_dir,
+        {
+            "role": "engineer",
+            "title": "新增待办事项",
+            "description": "作为用户，我希望能够快速添加新的待办事项。应用采用纯前端实现，浏览器可直接运行，无需后端。",
+            "acceptanceCriteria": [
+                "提供一个输入框，用户可输入待办事项内容",
+                "按下回车键或点击添加按钮后，待办事项添加到列表顶部",
+                "输入框在添加后自动清空",
+                "新增事项默认为未完成状态",
+                "使用 localStorage 保存数据",
+            ],
+        },
+    )
+
+    assert "Missing static frontend artifact: style.css" not in gaps
+    assert "Missing static frontend artifact: app.js" not in gaps
+
+
+
+def test_ralph_semantic_acceptance_gaps_accept_localstorage_in_inline_html_script(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    project_dir = workspace / "project" / "demo"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "index.html").write_text(
+        """
+        <!doctype html>
+        <html>
+          <body>
+            <input id="todoInput" autocomplete="off">
+            <button id="addBtn">添加</button>
+            <ul id="todoList"></ul>
+            <script>
+              const STORAGE_KEY = 'todos';
+              function saveTodos(items) {
+                localStorage.setItem(STORAGE_KEY, JSON.stringify(items));
+              }
+            </script>
+          </body>
+        </html>
+        """,
+        encoding="utf-8",
+    )
+
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(workspace), model="glm-5", streaming=False)
+
+    gaps = loop._ralph_semantic_acceptance_gaps(
+        project_dir,
+        {
+            "role": "engineer",
+            "title": "新增待办事项",
+            "description": "作为用户，我希望能够快速添加新的待办事项，并自动保存到 localStorage。",
+            "acceptanceCriteria": [
+                "提供一个输入框，用户可输入待办事项内容",
+                "点击添加按钮后新增事项保存到 localStorage",
+            ],
+        },
+    )
+
+    assert "Missing LocalStorage persistence logic in app.js" not in gaps
 
 
 def test_ralph_ensure_hatchling_wheel_packages_for_single_file_app_project(tmp_path: Path):
@@ -1742,6 +2551,120 @@ async def test_ralph_prepare_typecheck_environment_seeds_minimal_fastapi_route_t
 
 
 @pytest.mark.asyncio
+async def test_ralph_prepare_typecheck_environment_seeds_minimal_flask_route_test_for_package_app_main(monkeypatch, tmp_path: Path):
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(tmp_path / "workspace"), model="glm-5", streaming=False)
+    project_dir = tmp_path / "workspace" / "project" / "demo"
+    app_dir = project_dir / "app"
+    app_dir.mkdir(parents=True, exist_ok=True)
+    (app_dir / "__init__.py").write_text("from .main import app\n", encoding="utf-8")
+    (app_dir / "main.py").write_text(
+        "from flask import Flask\n"
+        "app = Flask(__name__)\n"
+        "@app.route('/')\n"
+        "def index() -> str:\n"
+        "    return 'ok'\n",
+        encoding="utf-8",
+    )
+    (project_dir / "pyproject.toml").write_text(
+        "[project]\n"
+        "name='demo'\n"
+        "version='0.1.0'\n\n"
+        "[build-system]\n"
+        "requires=['hatchling']\n"
+        "build-backend='hatchling.build'\n",
+        encoding="utf-8",
+    )
+
+    class _Proc:
+        returncode = 0
+
+        async def communicate(self):
+            return (b"sync ok", None)
+
+    async def _fake_create_subprocess_exec(*cmd, **kwargs):
+        return _Proc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+
+    evidence = await loop._ralph_prepare_typecheck_environment(
+        project_dir,
+        {"title": "项目初始化与基础架构", "acceptanceCriteria": ["Tests pass", "Typecheck passes"]},
+    )
+
+    test_path = project_dir / "tests" / "test_app.py"
+    assert test_path.exists()
+    content = test_path.read_text(encoding="utf-8")
+    assert "from app import app" in content
+    assert "client.get('/')" in content or "client.get("/")" in content
+    assert "Seeded minimal Flask route test" in evidence
+
+
+def test_ralph_targeted_story_hints_points_package_flask_projects_to_app_main(tmp_path: Path):
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(tmp_path / "workspace"), model="glm-5", streaming=False)
+    project_dir = tmp_path / "workspace" / "project" / "demo"
+    app_dir = project_dir / "app"
+    app_dir.mkdir(parents=True, exist_ok=True)
+    (app_dir / "__init__.py").write_text("from .main import app\n", encoding="utf-8")
+    (app_dir / "main.py").write_text(
+        "from flask import Flask\n"
+        "app = Flask(__name__)\n"
+        "@app.route('/')\n"
+        "def index() -> str:\n"
+        "    return 'ok'\n",
+        encoding="utf-8",
+    )
+    story = {"title": "任务数据模型与持久化", "acceptanceCriteria": ["Tests pass", "Typecheck passes"]}
+
+    hints = loop._ralph_targeted_story_hints(story, project_dir, "no tests ran in 0.00s")
+
+    assert "app/main.py" in hints
+    assert "tests/test_app.py" in hints
+
+@pytest.mark.asyncio
+async def test_ralph_prepare_typecheck_environment_bootstraps_dev_tools_when_uv_sync_succeeds_but_bins_missing(monkeypatch, tmp_path: Path):
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(tmp_path / "workspace"), model="glm-5", streaming=False)
+    project_dir = tmp_path / "workspace" / "project" / "demo"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "app.py").write_text(
+        "from flask import Flask\napp = Flask(__name__)\n@app.route('/')\ndef index() -> str:\n    return 'ok'\n",
+        encoding="utf-8",
+    )
+    (project_dir / "pyproject.toml").write_text(
+        "[project]\nname='demo'\nversion='0.1.0'\n"
+        "[project.optional-dependencies]\n"
+        "dev=['pytest>=8.0.0','mypy>=1.8.0']\n\n"
+        "[build-system]\nrequires=['hatchling']\nbuild-backend='hatchling.build'\n",
+        encoding="utf-8",
+    )
+
+    class _Proc:
+        returncode = 0
+
+        async def communicate(self):
+            return (b"sync ok", None)
+
+    async def _fake_create_subprocess_exec(*cmd, **kwargs):
+        return _Proc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    real_exists = Path.exists
+
+    def _fake_exists(path: Path):
+        if path.name in {"mypy", "pytest"} and path.parent.name == "bin":
+            return False
+        return real_exists(path)
+
+    monkeypatch.setattr(Path, "exists", _fake_exists)
+
+    evidence = await loop._ralph_prepare_typecheck_environment(
+        project_dir,
+        {"title": "项目初始化与基础架构", "acceptanceCriteria": ["Tests pass", "Typecheck passes"]},
+    )
+
+    assert "Bootstrapped missing dev tool wrappers" in evidence
+
+
+@pytest.mark.asyncio
 async def test_ralph_prepare_typecheck_environment_seeds_minimal_flask_scaffold_story(monkeypatch, tmp_path: Path):
     loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(tmp_path / "workspace"), model="glm-5", streaming=False)
     project_dir = tmp_path / "workspace" / "project" / "demo"
@@ -1785,6 +2708,109 @@ async def test_ralph_prepare_typecheck_environment_seeds_minimal_flask_scaffold_
     assert (project_dir / "app.py").exists()
     assert (project_dir / "templates" / "index.html").exists()
     assert (project_dir / "todos.json").exists()
+    assert (project_dir / "tests" / "test_app.py").exists()
+    assert "Seeded minimal Flask scaffold" in evidence
+
+
+@pytest.mark.asyncio
+async def test_ralph_prepare_typecheck_environment_seeds_minimal_flask_scaffold_story_for_sqlite_bootstrap(monkeypatch, tmp_path: Path):
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(tmp_path / "workspace"), model="glm-5", streaming=False)
+    project_dir = tmp_path / "workspace" / "project" / "demo"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "pyproject.toml").write_text(
+        "[project]\n"
+        "name='demo'\n"
+        "version='0.1.0'\n"
+        "readme='README.md'\n\n"
+        "[build-system]\n"
+        "requires=['hatchling']\n"
+        "build-backend='hatchling.build'\n",
+        encoding="utf-8",
+    )
+
+    class _Proc:
+        returncode = 0
+
+        async def communicate(self):
+            return (b"sync ok", None)
+
+    async def _fake_create_subprocess_exec(*cmd, **kwargs):
+        return _Proc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+
+    evidence = await loop._ralph_prepare_typecheck_environment(
+        project_dir,
+        {
+            "title": "项目初始化与基础架构",
+            "acceptanceCriteria": [
+                "必须包含文件: pyproject.toml、app.py、templates/index.html、todo.db",
+                "app.py 作为入口文件（不使用 main.py）",
+                "todo.db 初始化完成并可写入任务数据",
+                "访问首页 / 返回 HTTP 200",
+                "Tests pass",
+                "Typecheck passes",
+            ],
+        },
+    )
+
+    assert (project_dir / "app.py").exists()
+    assert (project_dir / "templates" / "index.html").exists()
+    assert (project_dir / "todo.db").exists()
+    assert (project_dir / "tests" / "test_app.py").exists()
+    assert "Seeded minimal Flask scaffold" in evidence
+
+
+@pytest.mark.asyncio
+async def test_ralph_prepare_typecheck_environment_backfills_missing_sqlite_bootstrap_template(monkeypatch, tmp_path: Path):
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(tmp_path / "workspace"), model="glm-5", streaming=False)
+    project_dir = tmp_path / "workspace" / "project" / "demo"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "pyproject.toml").write_text(
+        "[project]\nname='demo'\nversion='0.1.0'\nreadme='README.md'\n\n"
+        "[build-system]\nrequires=['hatchling']\nbuild-backend='hatchling.build'\n",
+        encoding="utf-8",
+    )
+    (project_dir / "app.py").write_text(
+        "import sqlite3\n"
+        "from pathlib import Path\n"
+        "from flask import Flask, g, render_template\n"
+        "app = Flask(__name__)\n"
+        "DATABASE_PATH = Path(__file__).parent / 'todo.db'\n"
+        "def init_db():\n    sqlite3.connect(str(DATABASE_PATH)).close()\n"
+        "@app.route('/')\n"
+        "def index():\n    return render_template('index.html', todos=[])\n",
+        encoding="utf-8",
+    )
+    (project_dir / "todo.db").write_bytes(b"")
+
+    class _Proc:
+        returncode = 0
+
+        async def communicate(self):
+            return (b"sync ok", None)
+
+    async def _fake_create_subprocess_exec(*cmd, **kwargs):
+        return _Proc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+
+    evidence = await loop._ralph_prepare_typecheck_environment(
+        project_dir,
+        {
+            "title": "项目初始化与基础架构",
+            "acceptanceCriteria": [
+                "必须包含文件: pyproject.toml、app.py、templates/index.html、todo.db",
+                "app.py 作为入口文件（不使用 main.py）",
+                "todo.db 初始化完成并可写入任务数据",
+                "访问首页 / 返回 HTTP 200",
+                "Tests pass",
+                "Typecheck passes",
+            ],
+        },
+    )
+
+    assert (project_dir / "templates" / "index.html").exists()
     assert (project_dir / "tests" / "test_app.py").exists()
     assert "Seeded minimal Flask scaffold" in evidence
 
@@ -2023,6 +3049,189 @@ async def test_ralph_prepare_typecheck_environment_seeds_delete_route_story(monk
     assert "Seeded Flask todo route support for /delete/<id>" in evidence
 
 
+@pytest.mark.asyncio
+async def test_ralph_prepare_typecheck_environment_seeds_sqlite_add_route_story(monkeypatch, tmp_path: Path):
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(tmp_path / "workspace"), model="glm-5", streaming=False)
+    project_dir = tmp_path / "workspace" / "project" / "demo"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "app.py").write_text(
+        "import sqlite3\n"
+        "from pathlib import Path\n"
+        "from flask import Flask, g, render_template\n"
+        "app = Flask(__name__)\n"
+        "DATABASE_PATH = Path(__file__).parent / 'todo.db'\n"
+        "def get_db() -> sqlite3.Connection:\n"
+        "    if 'db' not in g:\n"
+        "        g.db = sqlite3.connect(str(DATABASE_PATH))\n"
+        "        g.db.row_factory = sqlite3.Row\n"
+        "    return g.db\n"
+        "@app.teardown_appcontext\n"
+        "def close_db(exception: BaseException | None) -> None:\n"
+        "    db = g.pop('db', None)\n"
+        "    if db is not None:\n"
+        "        db.close()\n"
+        "def init_db() -> None:\n"
+        "    db = sqlite3.connect(str(DATABASE_PATH))\n"
+        "    db.execute('create table if not exists todos (id integer primary key autoincrement, content text not null, completed integer default 0)')\n"
+        "    db.commit()\n"
+        "    db.close()\n"
+        "@app.route('/')\n"
+        "def index():\n"
+        "    init_db()\n"
+        "    todos = get_db().execute('select id, content, completed from todos order by id').fetchall()\n"
+        "    return render_template('index.html', todos=todos)\n",
+        encoding="utf-8",
+    )
+    (project_dir / "templates").mkdir(parents=True, exist_ok=True)
+    (project_dir / "templates" / "index.html").write_text(
+        "<ul>{% for todo in todos %}<li>{{ todo.content }}</li>{% endfor %}</ul>\n",
+        encoding="utf-8",
+    )
+    (project_dir / "tests").mkdir(parents=True, exist_ok=True)
+    (project_dir / "tests" / "test_app.py").write_text(
+        "from app import app\n"
+        "def test_index_returns_200() -> None:\n"
+        "    app.config['TESTING'] = True\n"
+        "    with app.test_client() as client:\n"
+        "        response = client.get('/')\n"
+        "    assert response.status_code == 200\n",
+        encoding="utf-8",
+    )
+    (project_dir / "pyproject.toml").write_text(
+        "[project]\nname='demo'\nversion='0.1.0'\n\n[build-system]\nrequires=['hatchling']\nbuild-backend='hatchling.build'\n",
+        encoding="utf-8",
+    )
+    (project_dir / "todo.db").write_bytes(b"")
+
+    class _Proc:
+        returncode = 0
+
+        async def communicate(self):
+            return (b"sync ok", None)
+
+    async def _fake_create_subprocess_exec(*cmd, **kwargs):
+        return _Proc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+
+    evidence = await loop._ralph_prepare_typecheck_environment(
+        project_dir,
+        {
+            "title": "新增任务功能",
+            "acceptanceCriteria": [
+                "提交表单到路由 POST /add",
+                "任务写入 SQLite 数据库",
+                "首页包含输入框和提交按钮",
+                "Tests pass",
+                "Typecheck passes",
+            ],
+        },
+    )
+
+    app_text = (project_dir / "app.py").read_text(encoding="utf-8")
+    template_text = (project_dir / "templates" / "index.html").read_text(encoding="utf-8")
+    tests_text = (project_dir / "tests" / "test_app.py").read_text(encoding="utf-8")
+    assert 'INSERT INTO todos' in app_text
+    assert 'load_todos' not in app_text
+    assert 'save_todos' not in app_text
+    assert 'action="/add"' in template_text
+    assert 'sqlite3.connect' in tests_text
+    assert 'DATABASE_PATH' in tests_text
+    assert 'test_add_todo_success' in tests_text
+    assert "Seeded Flask todo route support for /add" in evidence
+
+
+@pytest.mark.asyncio
+async def test_ralph_prepare_typecheck_environment_seeds_sqlite_complete_and_delete_routes(monkeypatch, tmp_path: Path):
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(tmp_path / "workspace"), model="glm-5", streaming=False)
+    project_dir = tmp_path / "workspace" / "project" / "demo"
+    templates_dir = project_dir / "templates"
+    tests_dir = project_dir / "tests"
+    templates_dir.mkdir(parents=True, exist_ok=True)
+    tests_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "app.py").write_text(
+        "import sqlite3\n"
+        "from pathlib import Path\n"
+        "from flask import Flask, g, render_template\n"
+        "app = Flask(__name__)\n"
+        "DATABASE_PATH = Path(__file__).parent / 'todo.db'\n"
+        "def get_db() -> sqlite3.Connection:\n"
+        "    if 'db' not in g:\n"
+        "        g.db = sqlite3.connect(str(DATABASE_PATH))\n"
+        "        g.db.row_factory = sqlite3.Row\n"
+        "    return g.db\n"
+        "def init_db() -> None:\n"
+        "    db = sqlite3.connect(str(DATABASE_PATH))\n"
+        "    db.execute('create table if not exists todos (id integer primary key autoincrement, content text not null, completed integer default 0)')\n"
+        "    db.commit()\n"
+        "    db.close()\n"
+        "@app.route('/')\n"
+        "def index():\n"
+        "    init_db()\n"
+        "    todos = get_db().execute('select id, content, completed from todos order by id').fetchall()\n"
+        "    return render_template('index.html', todos=todos)\n",
+        encoding="utf-8",
+    )
+    (templates_dir / "index.html").write_text(
+        "<ul>{% for todo in todos %}<li>{{ todo.content }}</li>{% endfor %}</ul>\n",
+        encoding="utf-8",
+    )
+    (tests_dir / "test_app.py").write_text(
+        "from app import app\n"
+        "def test_index_returns_200() -> None:\n"
+        "    app.config['TESTING'] = True\n"
+        "    with app.test_client() as client:\n"
+        "        response = client.get('/')\n"
+        "    assert response.status_code == 200\n",
+        encoding="utf-8",
+    )
+    (project_dir / "pyproject.toml").write_text(
+        "[project]\nname='demo'\nversion='0.1.0'\n\n[build-system]\nrequires=['hatchling']\nbuild-backend='hatchling.build'\n",
+        encoding="utf-8",
+    )
+    (project_dir / "todo.db").write_bytes(b"")
+
+    class _Proc:
+        returncode = 0
+
+        async def communicate(self):
+            return (b"sync ok", None)
+
+    async def _fake_create_subprocess_exec(*cmd, **kwargs):
+        return _Proc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+
+    evidence = await loop._ralph_prepare_typecheck_environment(
+        project_dir,
+        {
+            "title": "任务状态更新与删除",
+            "acceptanceCriteria": [
+                "提交到路由 POST /complete/<id>",
+                "completed 状态写回 SQLite 数据库",
+                "SQLite 数据库中删除对应记录",
+                "提交到路由 POST /delete/<id>",
+                "Tests pass",
+                "Typecheck passes",
+            ],
+        },
+    )
+
+    app_text = (project_dir / "app.py").read_text(encoding="utf-8")
+    template_text = (templates_dir / "index.html").read_text(encoding="utf-8")
+    tests_text = (tests_dir / "test_app.py").read_text(encoding="utf-8")
+    assert 'UPDATE todos SET completed' in app_text
+    assert 'DELETE FROM todos' in app_text
+    assert 'from typing import Any' in app_text or 'from typing import cast, Any' in app_text
+    assert 'todo.get' not in template_text
+    assert 'action="/complete/{{ todo.id }}"' in template_text
+    assert 'action="/delete/{{ todo.id }}"' in template_text
+    assert 'test_complete_toggles_todo' in tests_text
+    assert 'test_delete_removes_todo' in tests_text
+    assert "Seeded Flask todo route support for /complete/<id>" in evidence
+    assert "Seeded Flask todo route support for /delete/<id>" in evidence
+
+
 def test_ralph_semantic_acceptance_gaps_accepts_typed_flask_route_placeholders(tmp_path: Path):
     loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(tmp_path / "workspace"), model="glm-5", streaming=False)
     project_dir = tmp_path / "workspace" / "project" / "demo"
@@ -2101,6 +3310,7 @@ def test_ralph_snapshot_and_change_detection_ignore_control_artifacts(tmp_path: 
     (project_dir / ".pytest_cache" / "v" / "cache").mkdir(parents=True, exist_ok=True)
     (project_dir / ".mypy_cache" / "3.12").mkdir(parents=True, exist_ok=True)
     (project_dir / ".venv" / "bin").mkdir(parents=True, exist_ok=True)
+    (project_dir / "node_modules" / "typescript" / "lib").mkdir(parents=True, exist_ok=True)
     (project_dir / ".git").mkdir(parents=True, exist_ok=True)
     (project_dir / "src" / "__pycache__").mkdir(parents=True, exist_ok=True)
 
@@ -2110,11 +3320,13 @@ def test_ralph_snapshot_and_change_detection_ignore_control_artifacts(tmp_path: 
     venv_file = project_dir / ".venv" / "bin" / "python"
     git_file = project_dir / ".git" / "HEAD"
     pyc_file = project_dir / "src" / "__pycache__" / "todo.cpython-312.pyc"
+    node_modules_file = project_dir / "node_modules" / "typescript" / "lib" / "tsc.js"
 
     source_file.write_text("print('ok')\n", encoding="utf-8")
     cache_file.write_text("[]\n", encoding="utf-8")
     mypy_file.write_text("{}\n", encoding="utf-8")
     venv_file.write_text("python\n", encoding="utf-8")
+    node_modules_file.write_text("console.log('tsc')\n", encoding="utf-8")
     git_file.write_text("ref: refs/heads/main\n", encoding="utf-8")
     pyc_file.write_bytes(b"pyc")
 
@@ -2125,6 +3337,7 @@ def test_ralph_snapshot_and_change_detection_ignore_control_artifacts(tmp_path: 
     time.sleep(0.01)
     cache_file.write_text("[\"tests/test_cli_list.py\"]\n", encoding="utf-8")
     mypy_file.write_text("{\"updated\": true}\n", encoding="utf-8")
+    node_modules_file.write_text("console.log('updated')\n", encoding="utf-8")
     pyc_file.write_bytes(b"new-pyc")
 
     assert loop._ralph_changed_artifacts([project_dir], snapshot) == []
@@ -2138,6 +3351,7 @@ def test_ralph_snapshot_and_change_detection_ignore_control_artifacts(tmp_path: 
     assert cache_file not in changed
     assert mypy_file not in changed
     assert venv_file not in changed
+    assert node_modules_file not in changed
     assert git_file not in changed
     assert pyc_file not in changed
 
@@ -2149,17 +3363,20 @@ def test_ralph_snapshot_and_change_detection_prune_control_root_walks(
     project_dir = tmp_path / "workspace" / "project" / "demo"
     (project_dir / "app").mkdir(parents=True, exist_ok=True)
     (project_dir / ".venv" / "bin").mkdir(parents=True, exist_ok=True)
+    (project_dir / "node_modules" / "typescript" / "lib").mkdir(parents=True, exist_ok=True)
     source_file = project_dir / "app" / "main.py"
     ignored_file = project_dir / ".venv" / "bin" / "python"
+    ignored_node_modules_file = project_dir / "node_modules" / "typescript" / "lib" / "tsc.js"
     source_file.write_text("print('ok')\n", encoding="utf-8")
     ignored_file.write_text("python\n", encoding="utf-8")
+    ignored_node_modules_file.write_text("console.log('tsc')\n", encoding="utf-8")
 
     real_rglob = Path.rglob
 
     def guarded_rglob(self: Path, pattern: str):
         for child in real_rglob(self, pattern):
             rel = child.relative_to(self)
-            if rel.parts and rel.parts[0] in {".venv", ".git", ".mypy_cache", ".pytest_cache", "__pycache__"}:
+            if rel.parts and rel.parts[0] in {".venv", ".git", ".mypy_cache", ".pytest_cache", "__pycache__", "node_modules"}:
                 raise AssertionError(f"unexpected traversal into ignored root: {rel}")
             yield child
 
@@ -2183,15 +3400,17 @@ def test_ralph_sync_and_materialized_artifacts_prune_control_root_walks(
     project_dir = tmp_path / "workspace" / "project" / "demo"
     (run_dir / "app").mkdir(parents=True, exist_ok=True)
     (run_dir / ".venv" / "bin").mkdir(parents=True, exist_ok=True)
+    (run_dir / "node_modules" / "typescript" / "lib").mkdir(parents=True, exist_ok=True)
     (run_dir / "app" / "main.py").write_text("print('ok')\n", encoding="utf-8")
     (run_dir / ".venv" / "bin" / "python").write_text("python\n", encoding="utf-8")
+    (run_dir / "node_modules" / "typescript" / "lib" / "tsc.js").write_text("console.log('tsc')\n", encoding="utf-8")
 
     real_rglob = Path.rglob
 
     def guarded_rglob(self: Path, pattern: str):
         for child in real_rglob(self, pattern):
             rel = child.relative_to(self)
-            if rel.parts and rel.parts[0] in {".venv", ".git", ".mypy_cache", ".pytest_cache", "__pycache__"}:
+            if rel.parts and rel.parts[0] in {".venv", ".git", ".mypy_cache", ".pytest_cache", "__pycache__", "node_modules"}:
                 raise AssertionError(f"unexpected traversal into ignored root: {rel}")
             yield child
 
@@ -2203,6 +3422,7 @@ def test_ralph_sync_and_materialized_artifacts_prune_control_root_walks(
     assert materialized == [run_dir / "app" / "main.py"]
     assert synced == [project_dir / "app" / "main.py"]
     assert not (project_dir / ".venv").exists()
+    assert not (project_dir / "node_modules").exists()
 
 
 @pytest.mark.asyncio
@@ -2818,6 +4038,7 @@ def test_ralph_should_ignore_ephemeral_artifacts(tmp_path: Path):
     assert loop._ralph_should_ignore_artifact(project_dir / ".venv" / "bin" / "pytest", project_dir) is True
     assert loop._ralph_should_ignore_artifact(project_dir / ".mypy_cache" / "x.data.json", project_dir) is True
     assert loop._ralph_should_ignore_artifact(project_dir / ".pytest_cache" / "README.md", project_dir) is True
+    assert loop._ralph_should_ignore_artifact(project_dir / "node_modules" / "typescript" / "lib" / "tsc.js", project_dir) is True
     assert loop._ralph_should_ignore_artifact(project_dir / "app" / "__pycache__" / "main.pyc", project_dir) is True
     assert loop._ralph_should_ignore_artifact(project_dir / "app" / "main.py", project_dir) is False
 
@@ -5184,6 +6405,75 @@ async def test_ralph_run_loop_enters_recovery_immediately_when_artifacts_fail_ve
     assert "Tests failed" in recovery_called["latest_output"]
 
 
+def test_ralph_autofinalize_completion_guard_accepts_single_file_static_frontend_bootstrap_story(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    project_dir = workspace / "project" / "demo"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "index.html").write_text(
+        """
+        <!doctype html>
+        <html>
+        <head>
+          <title>Todo List</title>
+          <style>body { background: #f5f5f5; }</style>
+        </head>
+        <body>
+          <script>const STORAGE_KEY = 'todolist';</script>
+        </body>
+        </html>
+        """,
+        encoding="utf-8",
+    )
+
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(workspace), model="glm-5", streaming=False)
+
+    story = {
+        "id": "US-001",
+        "title": "创建项目基础结构",
+        "description": "作为工程师，我需要创建 project/todolist 目录并初始化单文件 index.html 的基础结构。应用采用纯前端实现，浏览器可直接运行，无需后端。",
+        "acceptanceCriteria": [
+            "project/todolist/index.html 文件存在",
+            "HTML 文件包含标准的 <!DOCTYPE html> 声明和完整文档结构",
+            "CSS 样式内嵌于 <style> 标签中",
+            "JavaScript 代码内嵌于 <script> 标签中",
+            "页面标题显示 'Todo List'",
+        ],
+        "role": "engineer",
+    }
+
+    assert loop._ralph_autofinalize_completion_guard(story, project_dir) is True
+
+
+def test_ralph_autofinalize_completion_guard_accepts_static_frontend_bootstrap_story(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    project_dir = workspace / "project" / "demo"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "index.html").write_text(
+        '<!doctype html><link rel="stylesheet" href="style.css"><script src="app.js"></script>',
+        encoding="utf-8",
+    )
+    (project_dir / "style.css").write_text("body { font-family: sans-serif; }\n", encoding="utf-8")
+    (project_dir / "app.js").write_text("localStorage.getItem('todos')\n", encoding="utf-8")
+    (project_dir / "README.md").write_text("# demo\n", encoding="utf-8")
+
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(workspace), model="glm-5", streaming=False)
+
+    story = {
+        "id": "US-001",
+        "title": "项目初始化",
+        "description": "作为工程师，我希望创建一个可运行的纯前端项目结构，以便用户可以直接在浏览器中打开使用。",
+        "acceptanceCriteria": [
+            "项目目录结构清晰，位于 project/todolist",
+            "包含 index.html、style.css、app.js 文件",
+            "包含 README.md 运行说明文档",
+            "双击 HTML 文件可直接在浏览器中打开显示界面",
+        ],
+        "role": "engineer",
+    }
+
+    assert loop._ralph_autofinalize_completion_guard(story, project_dir) is True
+
+
 def test_ralph_autofinalize_completion_guard_accepts_root_layout_bootstrap_story(tmp_path: Path):
     workspace = tmp_path / "workspace"
     project_dir = workspace / "project" / "demo"
@@ -5304,6 +6594,78 @@ def test_ralph_autofinalize_completion_guard_rejects_web_story_without_required_
 
     assert loop._ralph_autofinalize_completion_guard(story, project_dir) is False
 
+def test_ralph_autofinalize_completion_guard_accepts_sqlite_web_story_with_embedded_db_logic(tmp_path: Path):
+    project_dir = tmp_path / "workspace" / "project" / "todolist"
+    templates_dir = project_dir / "templates"
+    tests_dir = project_dir / "tests"
+    templates_dir.mkdir(parents=True, exist_ok=True)
+    tests_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "app.py").write_text(
+        "import sqlite3\n"
+        "from pathlib import Path\n"
+        "from flask import Flask, redirect, render_template, request, url_for\n"
+        "app = Flask(__name__)\n"
+        "DATABASE = Path(__file__).parent / 'todo.db'\n"
+        "def get_db():\n"
+        "    return sqlite3.connect(DATABASE)\n"
+        "@app.route('/')\n"
+        "def index():\n"
+        "    return render_template('index.html')\n"
+        "@app.route('/add', methods=['POST'])\n"
+        "def add():\n"
+        "    conn = get_db()\n"
+        "    conn.execute('create table if not exists tasks (id integer primary key, content text, completed integer default 0)')\n"
+        "    conn.execute('insert into tasks (content, completed) values (?, 0)', (request.form.get('content', ''),))\n"
+        "    conn.commit()\n"
+        "    conn.close()\n"
+        "    return redirect(url_for('index'))\n"
+        "@app.route('/complete/<int:todo_id>', methods=['POST'])\n"
+        "def complete(todo_id: int):\n"
+        "    conn = get_db()\n"
+        "    conn.execute('update tasks set completed = 1 - completed where id = ?', (todo_id,))\n"
+        "    conn.commit()\n"
+        "    conn.close()\n"
+        "    return redirect(url_for('index'))\n"
+        "@app.route('/delete/<int:todo_id>', methods=['POST'])\n"
+        "def delete(todo_id: int):\n"
+        "    conn = get_db()\n"
+        "    conn.execute('delete from tasks where id = ?', (todo_id,))\n"
+        "    conn.commit()\n"
+        "    conn.close()\n"
+        "    return redirect(url_for('index'))\n",
+        encoding="utf-8",
+    )
+    (project_dir / "pyproject.toml").write_text(
+        '[project]\nname="todolist"\nversion="0.1.0"\n',
+        encoding="utf-8",
+    )
+    (templates_dir / "index.html").write_text(
+        '<form method="POST" action="/add"><input name="content"><button type="submit">add</button></form>\n'
+        '<form method="POST" action="/complete/1"><button>complete</button></form>\n'
+        '<form method="POST" action="/delete/1"><button>delete</button></form>\n',
+        encoding="utf-8",
+    )
+    (tests_dir / "test_app.py").write_text("def test_placeholder() -> None:\n    assert True\n", encoding="utf-8")
+    (project_dir / "todo.db").write_bytes(b"sqlite")
+
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(tmp_path / "workspace"), model="glm-5", streaming=False)
+
+    story = {
+        "id": "US-002",
+        "title": "新增任务功能",
+        "role": "engineer",
+        "acceptanceCriteria": [
+            "首页包含输入框和提交按钮",
+            "提交表单到路由 POST /add",
+            "任务写入 SQLite 数据库",
+            "刷新页面后仍能看到已添加的任务",
+            "空内容不可添加（前端或后端验证）",
+            "Tests pass",
+            "Typecheck passes",
+        ],
+    }
+
+    assert loop._ralph_autofinalize_completion_guard(story, project_dir) is True
 
 def test_ralph_build_qa_block_expands_letter_answers_into_authoritative_selections(tmp_path: Path):
     loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(tmp_path / "workspace"), model="glm-5", streaming=False)
@@ -6581,6 +7943,172 @@ async def test_ralph_run_loop_autofinalizes_recovery_when_project_is_already_gre
 
 
 @pytest.mark.asyncio
+async def test_ralph_run_loop_waits_for_second_failed_verification_before_entering_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    bus = MessageBus()
+    channel = _FakeChannel()
+
+    run_id = "run-story-transient-verification-failure"
+    chat_id = "ou_test"
+    run_dir = workspace / "ralph" / chat_id / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    project_dir = workspace / "project" / "demo"
+    project_dir.mkdir(parents=True, exist_ok=True)
+
+    prd_path = run_dir / "prd.json"
+    progress_path = run_dir / "progress.txt"
+    progress_path.write_text("# Ralph Progress\n", encoding="utf-8")
+    prd_path.write_text(
+        json.dumps(
+            {
+                "stories": [
+                    {
+                        "id": "US-001",
+                        "title": "项目初始化与基础架构",
+                        "role": "engineer",
+                        "acceptanceCriteria": [
+                            "必须包含文件: pyproject.toml、app.py、templates/index.html、todo.db",
+                            "app.py 作为入口文件（不使用 main.py）",
+                            "todo.db 初始化完成并可写入任务数据",
+                            "访问首页 / 返回 HTTP 200",
+                            "Tests pass",
+                            "Typecheck passes",
+                        ],
+                        "passes": False,
+                    }
+                ]
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    async def _write_artifacts_in_two_phases():
+        await asyncio.sleep(0.02)
+        (project_dir / "tests").mkdir(parents=True, exist_ok=True)
+        (project_dir / "tests" / "test_app.py").write_text(
+            "from app import app\n\n"
+            "def test_index_returns_200() -> None:\n"
+            "    app.config['TESTING'] = True\n"
+            "    with app.test_client() as client:\n"
+            "        response = client.get('/')\n"
+            "    assert response.status_code == 200\n",
+            encoding="utf-8",
+        )
+        (project_dir / "pyproject.toml").write_text(
+            "[project]\n"
+            "name='demo'\n"
+            "version='0.1.0'\n"
+            "dependencies = [\n"
+            '    "flask>=3.0.0",\n'
+            "]\n\n"
+            "[project.optional-dependencies]\n"
+            "dev = [\n"
+            '    "pytest>=8.0.0",\n'
+            '    "mypy>=1.8.0",\n'
+            "]\n\n"
+            "[build-system]\n"
+            "requires=['hatchling']\n"
+            "build-backend='hatchling.build'\n",
+            encoding="utf-8",
+        )
+        await asyncio.sleep(0.10)
+        (project_dir / "templates").mkdir(parents=True, exist_ok=True)
+        (project_dir / "todo.db").write_bytes(b"sqlite")
+        (project_dir / "templates" / "index.html").write_text("<h1>Todo</h1>\n", encoding="utf-8")
+        (project_dir / "app.py").write_text(
+            "import sqlite3\n"
+            "from pathlib import Path\n"
+            "from flask import Flask, render_template\n"
+            "from flask.typing import ResponseReturnValue\n\n"
+            "app = Flask(__name__)\n"
+            "DATABASE_PATH = Path(__file__).parent / 'todo.db'\n\n"
+            "def init_db() -> None:\n"
+            "    sqlite3.connect(str(DATABASE_PATH)).close()\n\n"
+            "@app.route('/')\n"
+            "def index() -> ResponseReturnValue:\n"
+            "    init_db()\n"
+            "    return render_template('index.html')\n",
+            encoding="utf-8",
+        )
+
+    fake_client = _HangingRalphClient(after_prompt=_write_artifacts_in_two_phases)
+    adapter = _FakeRalphAdapter(workspace, _FakeRalphStdio(fake_client))
+    loop = AgentLoop(
+        bus=bus,
+        adapter=adapter,
+        model="glm-5",
+        streaming=False,
+        channel_manager=_FakeChannelManager(channel),
+    )
+    loop._ralph_artifact_watchdog_seconds = 0.05
+    loop._ralph_prompt_poll_seconds = 0.01
+    loop._ralph_story_execution_watchdog_seconds = 1.0
+    loop._ralph_story_settle_timeout_seconds = 0.05
+
+    async def _verification_sequence(self, project_dir: Path, story: dict) -> bool:
+        return (project_dir / "app.py").exists() and (project_dir / "todo.db").exists()
+
+    recovery_called = {"count": 0}
+
+    async def _fake_retry(
+        self,
+        stdio,
+        run_dir,
+        project_dir,
+        story,
+        chat_id,
+        latest_output="",
+        failure_reason="",
+        task_prompt="",
+        prd_path=None,
+        progress_path=None,
+        story_index=None,
+    ):
+        recovery_called["count"] += 1
+        return ACPResponse(content="不应进入 recovery prompt", error=None)
+
+    monkeypatch.setattr(
+        AgentLoop,
+        "_ralph_prepare_typecheck_environment",
+        lambda self, project_dir, story: asyncio.sleep(0, result=""),
+    )
+    monkeypatch.setattr(AgentLoop, "_ralph_verification_passed", _verification_sequence)
+    monkeypatch.setattr(
+        AgentLoop,
+        "_ralph_collect_verification_evidence",
+        lambda self, project_dir, story: asyncio.sleep(0, result="transient verification failure"),
+    )
+    monkeypatch.setattr(AgentLoop, "_ralph_retry_incomplete_story", _fake_retry)
+
+    loop._ralph_set_current(chat_id, run_id)
+    loop._ralph_save_state(
+        run_dir,
+        {
+            "run_id": run_id,
+            "status": "approved",
+            "channel": "feishu",
+            "story_index": 0,
+            "pass_index": 0,
+            "project_dir": str(project_dir),
+        },
+    )
+
+    await asyncio.wait_for(loop._ralph_run_loop("feishu", chat_id, run_dir), timeout=2)
+
+    state = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+    story = json.loads(prd_path.read_text(encoding="utf-8"))["stories"][0]
+
+    assert state["status"] == "done"
+    assert story["passes"] is True
+    assert recovery_called["count"] == 0
+
+
+@pytest.mark.asyncio
 async def test_ralph_run_loop_grants_initial_grace_before_story_idle_watchdog(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -7059,6 +8587,163 @@ async def test_ralph_run_loop_waits_for_recent_artifact_activity_before_verifyin
     story = json.loads(prd_path.read_text(encoding="utf-8"))["stories"][0]
 
     assert recovery_called["count"] == 0
+    assert len(fake_client.create_session_calls) == 1
+    assert state["status"] == "done"
+    assert story["passes"] is True
+
+
+@pytest.mark.asyncio
+async def test_ralph_run_loop_ignores_incidental_project_files_until_explicit_story_artifacts_exist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    bus = MessageBus()
+    channel = _FakeChannel()
+
+    run_id = "run-explicit-artifacts-before-verification"
+    chat_id = "ou_test"
+    run_dir = workspace / "ralph" / chat_id / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    project_dir = workspace / "project" / "demo"
+    project_dir.mkdir(parents=True, exist_ok=True)
+
+    prd_path = run_dir / "prd.json"
+    progress_path = run_dir / "progress.txt"
+    progress_path.write_text("# Ralph Progress\n", encoding="utf-8")
+    prd_path.write_text(
+        json.dumps(
+            {
+                "stories": [
+                    {
+                        "id": "US-001",
+                        "title": "项目初始化与基础架构",
+                        "role": "engineer",
+                        "acceptanceCriteria": [
+                            "输出目录: project/demo",
+                            "必须包含文件: pyproject.toml、app.py、templates/index.html、todo.db",
+                            "app.py 作为入口文件（不使用 main.py）",
+                            "todo.db 初始化完成并可写入任务数据",
+                            "访问首页 / 返回 HTTP 200",
+                            "Tests pass",
+                            "Typecheck passes",
+                        ],
+                        "passes": False,
+                    }
+                ]
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    async def _write_incidental_then_required_artifacts():
+        await asyncio.sleep(0.02)
+        (project_dir / "README.md").write_text("# Demo\n", encoding="utf-8")
+        (project_dir / "pyproject.toml").write_text(
+            "[project]\n"
+            "name='demo'\n"
+            "version='0.1.0'\n",
+            encoding="utf-8",
+        )
+        (project_dir / "uv.lock").write_text("# lock\n", encoding="utf-8")
+        await asyncio.sleep(0.14)
+        (project_dir / "templates").mkdir(parents=True, exist_ok=True)
+        (project_dir / "tests").mkdir(parents=True, exist_ok=True)
+        (project_dir / "app.py").write_text(
+            "from flask import Flask, render_template\n\n"
+            "app = Flask(__name__)\n\n"
+            "@app.route('/')\n"
+            "def index():\n"
+            "    return render_template('index.html')\n",
+            encoding="utf-8",
+        )
+        (project_dir / "templates" / "index.html").write_text("<h1>Todo</h1>\n", encoding="utf-8")
+        (project_dir / "todo.db").write_bytes(b"sqlite")
+        (project_dir / "tests" / "test_app.py").write_text(
+            "from app import app\n\n"
+            "def test_index_returns_200() -> None:\n"
+            "    app.config['TESTING'] = True\n"
+            "    with app.test_client() as client:\n"
+            "        response = client.get('/')\n"
+            "    assert response.status_code == 200\n",
+            encoding="utf-8",
+        )
+
+    fake_client = _HangingRalphClient(after_prompt=_write_incidental_then_required_artifacts)
+    adapter = _FakeRalphAdapter(workspace, _FakeRalphStdio(fake_client))
+    loop = AgentLoop(
+        bus=bus,
+        adapter=adapter,
+        model="glm-5",
+        streaming=False,
+        channel_manager=_FakeChannelManager(channel),
+    )
+    loop._ralph_prompt_poll_seconds = 0.01
+    loop._ralph_artifact_watchdog_seconds = 0.05
+    loop._ralph_story_execution_watchdog_seconds = 1.0
+    loop._ralph_story_settle_timeout_seconds = 0.05
+
+    async def _verification_sequence(self, project_dir: Path, story: dict) -> bool:
+        return (
+            (project_dir / "app.py").exists()
+            and (project_dir / "templates" / "index.html").exists()
+            and (project_dir / "todo.db").exists()
+        )
+
+    recovery_called = {"count": 0}
+
+    async def _fake_retry(
+        self,
+        stdio,
+        run_dir,
+        project_dir,
+        story,
+        chat_id,
+        latest_output="",
+        failure_reason="",
+        task_prompt="",
+        prd_path=None,
+        progress_path=None,
+        story_index=None,
+    ):
+        recovery_called["count"] += 1
+        return ACPResponse(content="不应进入 recovery", error=None)
+
+    monkeypatch.setattr(
+        AgentLoop,
+        "_ralph_prepare_typecheck_environment",
+        lambda self, project_dir, story: asyncio.sleep(0, result=""),
+    )
+    monkeypatch.setattr(AgentLoop, "_ralph_verification_passed", _verification_sequence)
+    monkeypatch.setattr(
+        AgentLoop,
+        "_ralph_collect_verification_evidence",
+        lambda self, project_dir, story: asyncio.sleep(0, result="transient verification failure"),
+    )
+    monkeypatch.setattr(AgentLoop, "_ralph_retry_incomplete_story", _fake_retry)
+
+    loop._ralph_set_current(chat_id, run_id)
+    loop._ralph_save_state(
+        run_dir,
+        {
+            "run_id": run_id,
+            "status": "approved",
+            "channel": "feishu",
+            "story_index": 0,
+            "pass_index": 0,
+            "project_dir": str(project_dir),
+        },
+    )
+
+    await asyncio.wait_for(loop._ralph_run_loop("feishu", chat_id, run_dir), timeout=2)
+
+    state = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+    story = json.loads(prd_path.read_text(encoding="utf-8"))["stories"][0]
+
+    assert recovery_called["count"] == 0
+    assert len(fake_client.create_session_calls) == 1
     assert state["status"] == "done"
     assert story["passes"] is True
 
@@ -7247,3 +8932,986 @@ def test_ralph_pick_final_summary_strips_internal_done_marker(tmp_path: Path):
 
     assert "[RALPH_DONE]" not in summary
     assert "自动收口当前 story" in summary
+
+
+@pytest.mark.asyncio
+async def test_ralph_run_loop_rechecks_transient_verification_failure_before_entering_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    bus = MessageBus()
+    channel = _FakeChannel()
+
+    run_id = "run-story-transient-verification-recheck"
+    chat_id = "ou_test"
+    run_dir = workspace / "ralph" / chat_id / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    project_dir = workspace / "project" / "demo"
+    project_dir.mkdir(parents=True, exist_ok=True)
+
+    prd_path = run_dir / "prd.json"
+    progress_path = run_dir / "progress.txt"
+    progress_path.write_text("# Ralph Progress\n", encoding="utf-8")
+    prd_path.write_text(
+        json.dumps(
+            {
+                "stories": [
+                    {
+                        "id": "US-001",
+                        "title": "项目初始化与基础架构",
+                        "role": "engineer",
+                        "acceptanceCriteria": [
+                            "必须包含文件: pyproject.toml、app.py、templates/index.html、todo.db",
+                            "访问首页 / 返回 HTTP 200",
+                            "Tests pass",
+                            "Typecheck passes",
+                        ],
+                        "passes": False,
+                    }
+                ]
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    async def _write_artifacts_once():
+        await asyncio.sleep(0.02)
+        (project_dir / "templates").mkdir(parents=True, exist_ok=True)
+        (project_dir / "tests").mkdir(parents=True, exist_ok=True)
+        (project_dir / "pyproject.toml").write_text(
+            "[project]\n"
+            "name='demo'\n"
+            "version='0.1.0'\n",
+            encoding="utf-8",
+        )
+        (project_dir / "app.py").write_text(
+            "from flask import Flask, render_template\n\n"
+            "app = Flask(__name__)\n\n"
+            "@app.route('/')\n"
+            "def index():\n"
+            "    return render_template('index.html')\n",
+            encoding="utf-8",
+        )
+        (project_dir / "templates" / "index.html").write_text("<h1>Todo</h1>\n", encoding="utf-8")
+        (project_dir / "todo.db").write_bytes(b"sqlite")
+        (project_dir / "tests" / "test_app.py").write_text(
+            "from app import app\n\n"
+            "def test_index_returns_200() -> None:\n"
+            "    app.config['TESTING'] = True\n"
+            "    with app.test_client() as client:\n"
+            "        response = client.get('/')\n"
+            "    assert response.status_code == 200\n",
+            encoding="utf-8",
+        )
+
+    fake_client = _HangingRalphClient(after_prompt=_write_artifacts_once)
+    adapter = _FakeRalphAdapter(workspace, _FakeRalphStdio(fake_client))
+    loop = AgentLoop(
+        bus=bus,
+        adapter=adapter,
+        model="glm-5",
+        streaming=False,
+        channel_manager=_FakeChannelManager(channel),
+    )
+    loop._ralph_artifact_watchdog_seconds = 0.05
+    loop._ralph_prompt_poll_seconds = 0.01
+    loop._ralph_story_execution_watchdog_seconds = 1.0
+    loop._ralph_story_settle_timeout_seconds = 0.05
+
+    verification_calls = {"count": 0}
+
+    async def _verification_sequence(self, project_dir: Path, story: dict) -> bool:
+        verification_calls["count"] += 1
+        return verification_calls["count"] >= 2
+
+    recovery_called = {"count": 0}
+
+    async def _fake_retry(
+        self,
+        stdio,
+        run_dir,
+        project_dir,
+        story,
+        chat_id,
+        latest_output="",
+        failure_reason="",
+        task_prompt="",
+        prd_path=None,
+        progress_path=None,
+        story_index=None,
+    ):
+        recovery_called["count"] += 1
+        return ACPResponse(content="不应进入 recovery", error=None)
+
+    monkeypatch.setattr(
+        AgentLoop,
+        "_ralph_prepare_typecheck_environment",
+        lambda self, project_dir, story: asyncio.sleep(0, result=""),
+    )
+    monkeypatch.setattr(AgentLoop, "_ralph_verification_passed", _verification_sequence)
+    monkeypatch.setattr(
+        AgentLoop,
+        "_ralph_collect_verification_evidence",
+        lambda self, project_dir, story: asyncio.sleep(0, result="transient verification failure"),
+    )
+    monkeypatch.setattr(AgentLoop, "_ralph_retry_incomplete_story", _fake_retry)
+
+    loop._ralph_set_current(chat_id, run_id)
+    loop._ralph_save_state(
+        run_dir,
+        {
+            "run_id": run_id,
+            "status": "approved",
+            "channel": "feishu",
+            "story_index": 0,
+            "pass_index": 0,
+            "project_dir": str(project_dir),
+        },
+    )
+
+    await asyncio.wait_for(loop._ralph_run_loop("feishu", chat_id, run_dir), timeout=2)
+
+    state = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+    story = json.loads(prd_path.read_text(encoding="utf-8"))["stories"][0]
+
+    assert verification_calls["count"] >= 2
+    assert recovery_called["count"] == 0
+    assert state["status"] == "done"
+    assert story["passes"] is True
+
+
+def test_ralph_expected_artifact_paths_do_not_fall_back_to_project_dir_when_story_declares_files(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    project_dir = workspace / "project" / "todolist"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(workspace), model="glm-5", streaming=False)
+
+    story = {
+        "id": "US-001",
+        "title": "项目初始化与基础架构",
+        "role": "engineer",
+        "acceptanceCriteria": [
+            "输出目录: project/todolist",
+            "必须包含文件: pyproject.toml、app.py、templates/index.html、todo.db",
+            "app.py 作为入口文件（不使用 main.py）",
+            "访问首页 / 返回 HTTP 200",
+            "Tests pass",
+            "Typecheck passes",
+        ],
+    }
+
+    artifact_paths = loop._ralph_expected_artifact_paths(story, project_dir)
+
+    assert project_dir not in artifact_paths
+    assert project_dir / "app.py" in artifact_paths
+    assert project_dir / "templates" / "index.html" in artifact_paths
+    assert project_dir / "todo.db" in artifact_paths
+
+
+@pytest.mark.asyncio
+async def test_ralph_run_loop_does_not_enter_recovery_for_incidental_scaffold_files_before_required_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    bus = MessageBus()
+    channel = _FakeChannel()
+
+    run_id = "run-story-incidental-files-before-required-artifacts"
+    chat_id = "ou_test"
+    run_dir = workspace / "ralph" / chat_id / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    project_dir = workspace / "project" / "demo"
+    project_dir.mkdir(parents=True, exist_ok=True)
+
+    prd_path = run_dir / "prd.json"
+    progress_path = run_dir / "progress.txt"
+    progress_path.write_text("# Ralph Progress\n", encoding="utf-8")
+    prd_path.write_text(
+        json.dumps(
+            {
+                "stories": [
+                    {
+                        "id": "US-001",
+                        "title": "项目初始化与基础架构",
+                        "role": "engineer",
+                        "acceptanceCriteria": [
+                            "输出目录: project/demo",
+                            "必须包含文件: pyproject.toml、app.py、templates/index.html、todo.db",
+                            "app.py 作为入口文件（不使用 main.py）",
+                            "访问首页 / 返回 HTTP 200",
+                            "Tests pass",
+                            "Typecheck passes",
+                        ],
+                        "passes": False,
+                    }
+                ]
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    async def _write_artifacts_in_phases():
+        await asyncio.sleep(0.02)
+        (project_dir / "README.md").write_text("# Demo\n", encoding="utf-8")
+        (project_dir / "pyproject.toml").write_text(
+            "[project]\n"
+            "name='demo'\n"
+            "version='0.1.0'\n",
+            encoding="utf-8",
+        )
+        (project_dir / "uv.lock").write_text("lock\n", encoding="utf-8")
+        await asyncio.sleep(0.18)
+        (project_dir / "templates").mkdir(parents=True, exist_ok=True)
+        (project_dir / "tests").mkdir(parents=True, exist_ok=True)
+        (project_dir / "app.py").write_text(
+            "from flask import Flask, render_template\n\n"
+            "app = Flask(__name__)\n\n"
+            "@app.route('/')\n"
+            "def index():\n"
+            "    return render_template('index.html')\n",
+            encoding="utf-8",
+        )
+        (project_dir / "templates" / "index.html").write_text("<h1>Todo</h1>\n", encoding="utf-8")
+        (project_dir / "tests" / "test_app.py").write_text(
+            "from app import app\n\n"
+            "def test_index_returns_200() -> None:\n"
+            "    app.config['TESTING'] = True\n"
+            "    with app.test_client() as client:\n"
+            "        response = client.get('/')\n"
+            "    assert response.status_code == 200\n",
+            encoding="utf-8",
+        )
+        (project_dir / "todo.db").write_bytes(b"sqlite")
+
+    fake_client = _HangingRalphClient(after_prompt=_write_artifacts_in_phases)
+    adapter = _FakeRalphAdapter(workspace, _FakeRalphStdio(fake_client))
+    loop = AgentLoop(
+        bus=bus,
+        adapter=adapter,
+        model="glm-5",
+        streaming=False,
+        channel_manager=_FakeChannelManager(channel),
+    )
+    loop._ralph_artifact_watchdog_seconds = 0.05
+    loop._ralph_prompt_poll_seconds = 0.01
+    loop._ralph_story_execution_watchdog_seconds = 1.0
+    loop._ralph_story_settle_timeout_seconds = 0.05
+
+    async def _verification_sequence(self, project_dir: Path, story: dict) -> bool:
+        return (
+            (project_dir / "app.py").exists()
+            and (project_dir / "templates" / "index.html").exists()
+            and (project_dir / "todo.db").exists()
+        )
+
+    recovery_called = {"count": 0}
+
+    async def _fake_retry(
+        self,
+        stdio,
+        run_dir,
+        project_dir,
+        story,
+        chat_id,
+        latest_output="",
+        failure_reason="",
+        task_prompt="",
+        prd_path=None,
+        progress_path=None,
+        story_index=None,
+    ):
+        recovery_called["count"] += 1
+        return ACPResponse(content="不应进入 recovery", error=None)
+
+    monkeypatch.setattr(
+        AgentLoop,
+        "_ralph_prepare_typecheck_environment",
+        lambda self, project_dir, story: asyncio.sleep(0, result=""),
+    )
+    monkeypatch.setattr(AgentLoop, "_ralph_verification_passed", _verification_sequence)
+    monkeypatch.setattr(
+        AgentLoop,
+        "_ralph_collect_verification_evidence",
+        lambda self, project_dir, story: asyncio.sleep(0, result="transient verification failure"),
+    )
+    monkeypatch.setattr(AgentLoop, "_ralph_retry_incomplete_story", _fake_retry)
+
+    loop._ralph_set_current(chat_id, run_id)
+    loop._ralph_save_state(
+        run_dir,
+        {
+            "run_id": run_id,
+            "status": "approved",
+            "channel": "feishu",
+            "story_index": 0,
+            "pass_index": 0,
+            "project_dir": str(project_dir),
+        },
+    )
+
+    await asyncio.wait_for(loop._ralph_run_loop("feishu", chat_id, run_dir), timeout=2)
+
+    state = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+    story = json.loads(prd_path.read_text(encoding="utf-8"))["stories"][0]
+
+    assert recovery_called["count"] == 0
+    assert state["status"] == "done"
+    assert story["passes"] is True
+    assert len(fake_client.create_session_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_ralph_run_loop_reinvokes_typecheck_prep_after_story_artifacts_materialize(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    bus = MessageBus()
+    channel = _FakeChannel()
+
+    run_id = "run-story-watchdog-reinvokes-prep"
+    chat_id = "ou_test"
+    run_dir = workspace / "ralph" / chat_id / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    project_dir = workspace / "project" / "demo"
+    project_dir.mkdir(parents=True, exist_ok=True)
+
+    prd_path = run_dir / "prd.json"
+    progress_path = run_dir / "progress.txt"
+    progress_path.write_text("# Ralph Progress\n", encoding="utf-8")
+    prd_path.write_text(
+        json.dumps(
+            {
+                "stories": [
+                    {
+                        "id": "US-001",
+                        "title": "项目初始化与基础架构",
+                        "role": "engineer",
+                        "acceptanceCriteria": [
+                            "输出目录: project/demo",
+                            "必须包含文件: pyproject.toml、app.py、templates/index.html、todo.db",
+                            "app.py 作为入口文件（不使用 main.py）",
+                            "访问首页 / 返回 HTTP 200",
+                            "Tests pass",
+                            "Typecheck passes",
+                        ],
+                        "passes": False,
+                    }
+                ]
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    async def _write_story_artifacts():
+        await asyncio.sleep(0.02)
+        (project_dir / "pyproject.toml").write_text(
+            "[project]\n"
+            "name='demo'\n"
+            "version='0.1.0'\n"
+            "readme='README.md'\n",
+            encoding="utf-8",
+        )
+        (project_dir / "templates").mkdir(parents=True, exist_ok=True)
+        (project_dir / "tests").mkdir(parents=True, exist_ok=True)
+        (project_dir / "app.py").write_text(
+            "from flask import Flask, render_template\n\n"
+            "app = Flask(__name__)\n\n"
+            "@app.route('/')\n"
+            "def index():\n"
+            "    return render_template('index.html')\n",
+            encoding="utf-8",
+        )
+        (project_dir / "templates" / "index.html").write_text("<h1>Todo</h1>\n", encoding="utf-8")
+        (project_dir / "tests" / "test_app.py").write_text("def test_placeholder() -> None:\n    assert True\n", encoding="utf-8")
+        (project_dir / "todo.db").write_bytes(b"sqlite")
+
+    fake_client = _HangingRalphClient(after_prompt=_write_story_artifacts)
+    adapter = _FakeRalphAdapter(workspace, _FakeRalphStdio(fake_client))
+    loop = AgentLoop(
+        bus=bus,
+        adapter=adapter,
+        model="glm-5",
+        streaming=False,
+        channel_manager=_FakeChannelManager(channel),
+    )
+    loop._ralph_artifact_watchdog_seconds = 0.05
+    loop._ralph_prompt_poll_seconds = 0.01
+    loop._ralph_story_execution_watchdog_seconds = 1.0
+    loop._ralph_story_settle_timeout_seconds = 0.05
+
+    prep_calls = {"count": 0}
+    recovery_called = {"count": 0}
+
+    async def _prep_after_materialization(self, project_dir: Path, story: dict) -> str:
+        prep_calls["count"] += 1
+        pyproject_path = project_dir / "pyproject.toml"
+        readme_path = project_dir / "README.md"
+        if pyproject_path.exists() and not readme_path.exists():
+            readme_path.write_text("# Demo\n", encoding="utf-8")
+            return "Created missing README.md"
+        return ""
+
+    async def _verification_after_prep(self, project_dir: Path, story: dict) -> bool:
+        return (
+            (project_dir / "pyproject.toml").exists()
+            and (project_dir / "README.md").exists()
+            and (project_dir / "app.py").exists()
+            and (project_dir / "templates" / "index.html").exists()
+            and (project_dir / "todo.db").exists()
+        )
+
+    async def _evidence_if_readme_missing(self, project_dir: Path, story: dict) -> str:
+        if not (project_dir / "README.md").exists():
+            return "README missing"
+        return ""
+
+    async def _fake_retry(
+        self,
+        stdio,
+        run_dir,
+        project_dir,
+        story,
+        chat_id,
+        latest_output="",
+        failure_reason="",
+        task_prompt="",
+        prd_path=None,
+        progress_path=None,
+        story_index=None,
+    ):
+        recovery_called["count"] += 1
+        return ACPResponse(content="不应进入 recovery", error=None)
+
+    monkeypatch.setattr(AgentLoop, "_ralph_prepare_typecheck_environment", _prep_after_materialization)
+    monkeypatch.setattr(AgentLoop, "_ralph_verification_passed", _verification_after_prep)
+    monkeypatch.setattr(AgentLoop, "_ralph_collect_verification_evidence", _evidence_if_readme_missing)
+    monkeypatch.setattr(AgentLoop, "_ralph_retry_incomplete_story", _fake_retry)
+
+    loop._ralph_set_current(chat_id, run_id)
+    loop._ralph_save_state(
+        run_dir,
+        {
+            "run_id": run_id,
+            "status": "approved",
+            "channel": "feishu",
+            "story_index": 0,
+            "pass_index": 0,
+            "project_dir": str(project_dir),
+        },
+    )
+
+    await asyncio.wait_for(loop._ralph_run_loop("feishu", chat_id, run_dir), timeout=2)
+
+    state = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+    story = json.loads(prd_path.read_text(encoding="utf-8"))["stories"][0]
+
+    assert prep_calls["count"] >= 2
+    assert recovery_called["count"] == 0
+    assert (project_dir / "README.md").exists()
+    assert state["status"] == "done"
+    assert story["passes"] is True
+
+
+@pytest.mark.asyncio
+async def test_ralph_retry_incomplete_story_rechecks_existing_artifacts_when_recovery_only_writes_pyproject(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    bus = MessageBus()
+    channel = _FakeChannel()
+
+    run_id = "run-recovery-existing-artifacts-pyproject-only"
+    chat_id = "ou_test"
+    run_dir = workspace / "ralph" / chat_id / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    project_dir = workspace / "project" / "demo"
+    project_dir.mkdir(parents=True, exist_ok=True)
+
+    (project_dir / "templates").mkdir(parents=True, exist_ok=True)
+    (project_dir / "tests").mkdir(parents=True, exist_ok=True)
+    (project_dir / "app.py").write_text(
+        "from flask import Flask, render_template\n\n"
+        "app = Flask(__name__)\n\n"
+        "@app.route('/')\n"
+        "def index():\n"
+        "    return render_template('index.html')\n",
+        encoding="utf-8",
+    )
+    (project_dir / "templates" / "index.html").write_text("<h1>Todo</h1>\n", encoding="utf-8")
+    (project_dir / "tests" / "test_app.py").write_text(
+        "def test_placeholder() -> None:\n    assert True\n",
+        encoding="utf-8",
+    )
+    (project_dir / "todo.db").write_bytes(b"sqlite")
+
+    prd_path = run_dir / "prd.json"
+    progress_path = run_dir / "progress.txt"
+    progress_path.write_text("# Ralph Progress\n", encoding="utf-8")
+    prd_path.write_text(
+        json.dumps(
+            {
+                "stories": [
+                    {
+                        "id": "US-001",
+                        "title": "项目初始化与基础架构",
+                        "role": "engineer",
+                        "acceptanceCriteria": [
+                            "输出目录: project/demo",
+                            "必须包含文件: pyproject.toml、app.py、templates/index.html、todo.db",
+                            "app.py 作为入口文件（不使用 main.py）",
+                            "访问首页 / 返回 HTTP 200",
+                            "Tests pass",
+                            "Typecheck passes",
+                        ],
+                        "passes": False,
+                    }
+                ]
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    story = json.loads(prd_path.read_text(encoding="utf-8"))["stories"][0]
+
+    async def _write_pyproject_only():
+        await asyncio.sleep(0.02)
+        (project_dir / "pyproject.toml").write_text(
+            "[project]\n"
+            "name='demo'\n"
+            "version='0.1.0'\n"
+            "readme='README.md'\n",
+            encoding="utf-8",
+        )
+
+    fake_client = _HangingRalphClient(after_prompt=_write_pyproject_only)
+    adapter = _FakeRalphAdapter(workspace, _FakeRalphStdio(fake_client))
+    loop = AgentLoop(
+        bus=bus,
+        adapter=adapter,
+        model="glm-5",
+        streaming=False,
+        channel_manager=_FakeChannelManager(channel),
+    )
+    loop._ralph_artifact_watchdog_seconds = 0.05
+    loop._ralph_prompt_poll_seconds = 0.01
+    loop._ralph_recovery_execution_watchdog_seconds = 1.0
+    loop._ralph_recovery_idle_watchdog_seconds = 0.5
+
+    prep_calls = {"count": 0}
+
+    async def _prep_after_pyproject(self, project_dir: Path, story: dict) -> str:
+        prep_calls["count"] += 1
+        pyproject_path = project_dir / "pyproject.toml"
+        readme_path = project_dir / "README.md"
+        if pyproject_path.exists() and not readme_path.exists():
+            readme_path.write_text("# Demo\n", encoding="utf-8")
+            return "Created missing README.md"
+        return ""
+
+    async def _verification_after_prep(self, project_dir: Path, story: dict) -> bool:
+        return (
+            (project_dir / "app.py").exists()
+            and (project_dir / "templates" / "index.html").exists()
+            and (project_dir / "tests" / "test_app.py").exists()
+            and (project_dir / "todo.db").exists()
+            and (project_dir / "pyproject.toml").exists()
+            and (project_dir / "README.md").exists()
+        )
+
+    async def _evidence_if_readme_missing(self, project_dir: Path, story: dict) -> str:
+        if (project_dir / "pyproject.toml").exists() and not (project_dir / "README.md").exists():
+            return "README missing"
+        return ""
+
+    monkeypatch.setattr(AgentLoop, "_ralph_prepare_typecheck_environment", _prep_after_pyproject)
+    monkeypatch.setattr(AgentLoop, "_ralph_verification_passed", _verification_after_prep)
+    monkeypatch.setattr(AgentLoop, "_ralph_collect_verification_evidence", _evidence_if_readme_missing)
+
+    response = await asyncio.wait_for(
+        loop._ralph_retry_incomplete_story(
+            stdio=adapter._stdio,
+            run_dir=run_dir,
+            project_dir=project_dir,
+            story=story,
+            chat_id=chat_id,
+            latest_output="Supervisor verification evidence: README missing",
+            failure_reason="",
+            task_prompt="build todo app",
+            prd_path=prd_path,
+            progress_path=progress_path,
+            story_index=0,
+        ),
+        timeout=2,
+    )
+
+    updated_story = json.loads(prd_path.read_text(encoding="utf-8"))["stories"][0]
+    progress = progress_path.read_text(encoding="utf-8")
+
+    assert response is not None
+    assert response.error is None
+    assert prep_calls["count"] >= 1
+    assert (project_dir / "README.md").exists()
+    assert updated_story["passes"] is True
+    assert "自动收口当前 story" in progress
+
+
+def test_ralph_autofinalize_completion_guard_accepts_bootstrap_story_titled_jichujiegou(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    project_dir = workspace / "project" / "demo"
+    (project_dir / "app").mkdir(parents=True, exist_ok=True)
+    (project_dir / "app" / "templates").mkdir(parents=True, exist_ok=True)
+    (project_dir / "app" / "static").mkdir(parents=True, exist_ok=True)
+    (project_dir / "tests").mkdir(parents=True, exist_ok=True)
+    (project_dir / "pyproject.toml").write_text('[project]\nname="demo"\nversion="0.1.0"\n', encoding="utf-8")
+    (project_dir / "app" / "main.py").write_text("from flask import Flask\napp = Flask(__name__)\n", encoding="utf-8")
+    (project_dir / "app" / "routes.py").write_text(
+        "from flask import Flask, render_template\n"
+        "from flask.typing import ResponseReturnValue\n"
+        "app = Flask(__name__)\n"
+        "@app.route(\"/\")\n"
+        "def index() -> ResponseReturnValue:\n"
+        "    return render_template(\"index.html\")\n",
+        encoding="utf-8",
+    )
+    (project_dir / "app" / "templates" / "index.html").write_text("<input><button>add</button>\n", encoding="utf-8")
+    (project_dir / "tests" / "test_routes.py").write_text("def test_smoke() -> None:\n    assert True\n", encoding="utf-8")
+
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(workspace), model="glm-5", streaming=False)
+    story = {
+        "id": "US-001",
+        "title": "项目初始化与基础结构",
+        "description": "作为工程师，我希望搭建项目的基础结构和框架，以便后续功能开发能够顺利进行。",
+        "acceptanceCriteria": [
+            "项目目录结构清晰，位于 project/todolist",
+            "包含基础 HTML、CSS、JavaScript 文件",
+            "跨平台兼容性验证通过（macOS、Windows、Linux）",
+            "Tests pass",
+            "Typecheck passes",
+        ],
+        "role": "engineer",
+    }
+
+    assert loop._ralph_autofinalize_completion_guard(story, project_dir) is True
+
+
+def test_ralph_targeted_story_hints_cover_flask_render_template_response_mismatch(tmp_path: Path):
+    project_dir = tmp_path / "workspace" / "project" / "todolist"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "app.py").write_text(
+        "from flask import Flask, render_template\n"
+        "app = Flask(__name__)\n"
+        "@app.route('/')\n"
+        "def index() -> Response:\n"
+        "    return render_template('index.html')\n",
+        encoding="utf-8",
+    )
+
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(tmp_path / "workspace"), model="glm-5", streaming=False)
+    hints = loop._ralph_targeted_story_hints(
+        story={"role": "engineer", "title": "项目初始化与基础结构", "acceptanceCriteria": ["Typecheck passes"]},
+        project_dir=project_dir,
+        latest_output=(
+            "Supervisor verification evidence:\n"
+            "app.py:4: error: Incompatible return value type (got \"str\", expected \"Response\")  [return-value]\n"
+        ),
+    )
+
+    assert "ResponseReturnValue" in hints
+    assert "render_template" in hints
+
+
+@pytest.mark.asyncio
+async def test_ralph_collect_verification_evidence_uses_typescript_typecheck_for_frontend_project(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    project_dir = workspace / "project" / "demo"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "package.json").write_text(
+        '{"name":"demo","scripts":{"typecheck":"tsc --noEmit"}}\n',
+        encoding="utf-8",
+    )
+    (project_dir / "tsconfig.json").write_text('{"compilerOptions":{"strict":true}}\n', encoding="utf-8")
+    (project_dir / "app.ts").write_text("const value: string = 'ok';\n", encoding="utf-8")
+    bin_dir = project_dir / "node_modules" / ".bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    (bin_dir / "tsc").write_text("#!/bin/sh\necho ts ok\nexit 0\n", encoding="utf-8")
+    os.chmod(bin_dir / "tsc", 0o755)
+
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(workspace), model="glm-5", streaming=False)
+    evidence = await loop._ralph_collect_verification_evidence(
+        project_dir=project_dir,
+        story={"role": "engineer", "title": "新增 Todo 项", "acceptanceCriteria": ["Typecheck passes"]},
+    )
+
+    assert "tsc" in evidence
+    assert "--noEmit" in evidence
+
+
+@pytest.mark.asyncio
+async def test_ralph_prepare_typecheck_environment_uses_npm_install_for_frontend_project(monkeypatch, tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    project_dir = workspace / "project" / "demo"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "package.json").write_text(
+        '{"name":"demo","devDependencies":{"typescript":"^5.0.0"}}\n',
+        encoding="utf-8",
+    )
+    (project_dir / "package-lock.json").write_text('{"name":"demo"}\n', encoding="utf-8")
+    (project_dir / "tsconfig.json").write_text('{"compilerOptions":{"strict":true}}\n', encoding="utf-8")
+    (project_dir / "app.ts").write_text("const value: string = 'ok';\n", encoding="utf-8")
+
+    calls: list[tuple[str, ...]] = []
+
+    class _Proc:
+        def __init__(self, cmd: tuple[str, ...]):
+            self.returncode = 0
+            self.cmd = cmd
+
+        async def communicate(self):
+            return (f"{' '.join(self.cmd)} ok".encode(), None)
+
+    async def _fake_create_subprocess_exec(*cmd, **kwargs):
+        calls.append(tuple(cmd))
+        return _Proc(tuple(cmd))
+
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(workspace), model="glm-5", streaming=False)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+
+    evidence = await loop._ralph_prepare_typecheck_environment(
+        project_dir=project_dir,
+        story={"role": "engineer", "title": "新增 Todo 项", "acceptanceCriteria": ["Typecheck passes"]},
+    )
+
+    assert calls[0] == ("npm", "ci")
+    assert "$ npm ci" in evidence
+    assert "uv sync" not in evidence
+
+
+def test_ralph_semantic_acceptance_gaps_reject_placeholder_static_frontend_add_story(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    project_dir = workspace / "project" / "demo"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "index.html").write_text(
+        """
+        <!DOCTYPE html>
+        <html lang="zh-CN">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Todo List</title>
+            <style>
+                .todo-item.completed .todo-text { text-decoration: line-through; }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>Todo List</h1>
+                <div class="input-section">
+                    <input type="text" id="todoInput" placeholder="输入待办事项...">
+                    <button id="addBtn">添加</button>
+                </div>
+                <ul class="todo-list" id="todoList"></ul>
+            </div>
+            <script>
+                // JavaScript 代码区域
+                // 后续功能实现将在这里添加
+                const STORAGE_KEY = 'todolist';
+                let todos = [];
+                function init() {
+                    // 后续实现
+                }
+                function renderTodos() {
+                    // 后续实现
+                }
+                function addTodo(text) {
+                    // 后续实现
+                }
+                function toggleTodo(id) {
+                    // 后续实现
+                }
+                function deleteTodo(id) {
+                    // 后续实现
+                }
+                function saveTodos() {
+                    // 后续实现
+                }
+                function loadTodos() {
+                    // 后续实现
+                }
+            </script>
+        </body>
+        </html>
+        """,
+        encoding="utf-8",
+    )
+
+    story = {
+        "role": "engineer",
+        "title": "新增待办事项",
+        "description": "作为用户，我希望能够快速添加新的待办事项，以便记录我需要完成的任务。应用采用纯前端实现，浏览器可直接运行，无需后端。",
+        "acceptanceCriteria": [
+            "页面提供输入框用于输入待办内容",
+            "点击添加按钮可提交新事项",
+            "按回车键可提交新事项",
+            "新事项显示在列表底部",
+            "输入框提交后自动清空，可继续添加",
+            "每个事项包含唯一 id、text、completed、createdAt 属性",
+            "数据自动保存至 localStorage（key: 'todolist'）",
+            "页面刷新后数据保留",
+        ],
+    }
+
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(workspace), model="glm-5", streaming=False)
+
+    gaps = loop._ralph_semantic_acceptance_gaps(project_dir, story)
+
+    assert "Missing add-item interaction logic in UI" in gaps
+    assert "Missing LocalStorage write path in frontend implementation" in gaps
+    assert "Missing LocalStorage read path in frontend implementation" in gaps
+    assert "Missing todo item field implementation: createdAt" in gaps
+    assert loop._ralph_autofinalize_completion_guard(story, project_dir) is False
+
+
+def test_ralph_semantic_acceptance_gaps_accepts_explicit_script_js_static_frontend_bootstrap_story(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    project_dir = workspace / "project" / "demo"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "index.html").write_text(
+        '<!doctype html><link rel="stylesheet" href="style.css"><script src="script.js"></script>',
+        encoding="utf-8",
+    )
+    (project_dir / "style.css").write_text("body { color: #111; }\n", encoding="utf-8")
+    (project_dir / "script.js").write_text("console.log('boot');\n", encoding="utf-8")
+
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(workspace), model="glm-5", streaming=False)
+
+    story = {
+        "id": "US-001",
+        "title": "创建项目基础结构",
+        "description": "作为开发者，我希望创建项目基础文件结构（index.html、style.css、script.js），以便后续功能开发有完整的项目框架。",
+        "acceptanceCriteria": [
+            "在 project/todolist 目录下创建 index.html 文件",
+            "在 project/todolist 目录下创建 style.css 文件",
+            "在 project/todolist 目录下创建 script.js 文件",
+            "index.html 正确引入 style.css 和 script.js",
+            "用浏览器打开 index.html 页面能正常加载无报错",
+        ],
+        "role": "engineer",
+    }
+
+    gaps = loop._ralph_semantic_acceptance_gaps(project_dir, story)
+
+    assert "Missing static frontend artifact: app.js" not in gaps
+    assert "index.html is missing script reference to app.js" not in gaps
+    assert gaps == []
+    assert loop._ralph_autofinalize_completion_guard(story, project_dir) is True
+
+
+def test_ralph_semantic_acceptance_gaps_accepts_dynamic_checkbox_created_in_javascript(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    project_dir = workspace / "project" / "demo"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "index.html").write_text(
+        '<!doctype html><body><ul id="todoList"></ul><script src="app.js"></script></body>',
+        encoding="utf-8",
+    )
+    (project_dir / "style.css").write_text(".todo-item.completed .todo-text { text-decoration: line-through; }\n", encoding="utf-8")
+    (project_dir / "app.js").write_text(
+        """
+        function toggleTodo(id) {
+            return id;
+        }
+        function renderTodo(todo) {
+            const item = document.createElement('li');
+            item.className = `todo-item${todo.completed ? ' completed' : ''}`;
+            const checkbox = document.createElement('input');
+            checkbox.type = 'checkbox';
+            checkbox.checked = todo.completed;
+            checkbox.className = 'todo-checkbox';
+            checkbox.addEventListener('change', () => toggleTodo(todo.id));
+            const text = document.createElement('span');
+            text.className = 'todo-text';
+            text.textContent = todo.text;
+            item.append(checkbox, text);
+            document.getElementById('todoList').appendChild(item);
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(workspace), model="glm-5", streaming=False)
+
+    story = {
+        "id": "US-003",
+        "title": "完成待办功能",
+        "description": "作为用户，我希望能够标记待办事项为已完成，以便区分已完成和未完成的任务。",
+        "acceptanceCriteria": [
+            "每个待办事项前有复选框",
+            "点击复选框切换完成状态",
+            "已完成事项有视觉区分（如删除线或变灰）",
+            "状态变更自动保存到 localStorage",
+        ],
+        "role": "engineer",
+    }
+
+    gaps = loop._ralph_semantic_acceptance_gaps(project_dir, story)
+
+    assert "Missing completion control in UI" not in gaps
+
+
+def test_ralph_autofinalize_completion_guard_accepts_static_frontend_localstorage_persistence_story(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    project_dir = workspace / "project" / "demo"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "index.html").write_text(
+        '<!doctype html><body><p id="emptyState">空列表</p><ul id="todoList"></ul><script src="app.js"></script></body>',
+        encoding="utf-8",
+    )
+    (project_dir / "style.css").write_text("body { font-family: sans-serif; }\n", encoding="utf-8")
+    (project_dir / "app.js").write_text(
+        """
+        const STORAGE_KEY = 'todolist_data';
+        function loadTodos() {
+            const raw = localStorage.getItem(STORAGE_KEY);
+            return raw ? JSON.parse(raw) : [];
+        }
+        function renderTodos() {
+            const list = document.getElementById('todoList');
+            const emptyState = document.getElementById('emptyState');
+            const todos = loadTodos();
+            list.innerHTML = '';
+            emptyState.hidden = todos.length !== 0;
+        }
+        document.addEventListener('DOMContentLoaded', renderTodos);
+        """,
+        encoding="utf-8",
+    )
+
+    loop = AgentLoop(bus=MessageBus(), adapter=_FakeAdapter(workspace), model="glm-5", streaming=False)
+
+    story = {
+        "id": "US-005",
+        "title": "数据持久化与页面加载",
+        "description": "作为用户，我希望刷新页面后待办列表仍然保留，以便不丢失我的任务记录。",
+        "acceptanceCriteria": [
+            "页面加载时从 localStorage 读取并渲染已有数据",
+            "正确恢复所有待办事项及其完成状态",
+            "首次访问（无数据）时显示空列表",
+        ],
+        "role": "engineer",
+    }
+
+    gaps = loop._ralph_semantic_acceptance_gaps(project_dir, story)
+
+    assert gaps == []
+    assert loop._ralph_autofinalize_completion_guard(story, project_dir) is True

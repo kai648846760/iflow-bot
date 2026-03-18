@@ -486,3 +486,45 @@ def test_ralph_prompt_constraints_respect_explicit_fastapi_sqlite_choices():
         '项目初始化与基础结构',
         '数据模型与存储层',
     ]
+
+
+def test_ralph_prompt_constraints_respect_explicit_flask_sqlite_choices():
+    loop = AgentLoop(bus=MessageBus(), adapter=_DummyAdapter(), model='glm-5', streaming=False)
+    prd = {
+        'project': 'Todo List Web 应用',
+        'stories': [
+            {'id': 'US-001', 'title': '项目初始化与基础架构', 'description': '初始化项目', 'acceptanceCriteria': ['Typecheck passes'], 'role': 'engineer'},
+            {'id': 'US-002', 'title': '新增任务功能', 'description': '新增任务', 'acceptanceCriteria': ['Typecheck passes'], 'role': 'engineer'},
+            {'id': 'US-003', 'title': '完成任务功能', 'description': '完成任务', 'acceptanceCriteria': ['Typecheck passes'], 'role': 'engineer'},
+            {'id': 'US-004', 'title': '删除任务功能', 'description': '删除任务', 'acceptanceCriteria': ['Typecheck passes'], 'role': 'engineer'},
+        ],
+    }
+    prd['userStories'] = list(prd['stories'])
+
+    constrained = loop._ralph_apply_prompt_constraints_to_prd(
+        prd,
+        prompt='做一个 Todo List Web 应用，使用 Python 3 + uv，输出到 /Users/LokiTina/.iflow-bot/workspace/project/todolist，支持新增、完成、删除任务。',
+        qa_block='必须使用 Flask + SQLite；不要注册登录；界面极简。',
+    )
+
+    story1 = constrained['stories'][0]
+    joined1 = '\n'.join(story1['acceptanceCriteria'])
+    assert 'templates/index.html' in joined1
+    assert 'todo.db' in joined1 or 'SQLite' in joined1 or '数据库' in joined1
+    assert 'todos.json' not in joined1
+
+    story2 = constrained['stories'][1]
+    joined2 = '\n'.join(story2['acceptanceCriteria'])
+    assert '提交表单到路由 POST /add' in joined2
+    assert '数据库' in joined2 or 'SQLite' in joined2
+    assert 'todos.json' not in joined2
+
+    story3 = constrained['stories'][2]
+    joined3 = '\n'.join(story3['acceptanceCriteria'])
+    assert '提交到路由 POST /complete/<id>' in joined3
+    assert 'todos.json' not in joined3
+
+    story4 = constrained['stories'][3]
+    joined4 = '\n'.join(story4['acceptanceCriteria'])
+    assert '提交到路由 POST /delete/<id>' in joined4
+    assert 'todos.json' not in joined4

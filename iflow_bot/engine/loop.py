@@ -1406,14 +1406,25 @@ policy: {policy}
                 continue
             criteria.append(text)
 
+        is_static_frontend_story = self._ralph_is_static_frontend_story(
+            {
+                "title": story.get("title"),
+                "description": story.get("description"),
+                "acceptanceCriteria": criteria,
+            }
+        )
+
         if role in {"researcher", "writer"}:
             criteria = [
                 item
                 for item in criteria
                 if item.lower() not in {"typecheck passes", "tests pass"}
             ]
-        elif "Typecheck passes" not in criteria:
-            criteria.append("Typecheck passes")
+        else:
+            if is_static_frontend_story:
+                criteria = [item for item in criteria if item.lower() != "typecheck passes"]
+            elif "Typecheck passes" not in criteria:
+                criteria.append("Typecheck passes")
 
         if not criteria:
             criteria = self._ralph_synthesize_acceptance_criteria(story, role)
@@ -2055,7 +2066,7 @@ policy: {policy}
 
     def _ralph_is_flask_json_todo_prompt(self, prompt: str, qa_block: str = "") -> bool:
         text = f"{prompt}\n{qa_block}".lower()
-        return all(token in text for token in ("todo", "flask", "json"))
+        return all(token in text for token in ("todo", "flask"))
 
     def _ralph_is_default_simple_todo_prompt(self, prompt: str, qa_block: str = "") -> bool:
         text = f"{prompt}\n{qa_block}".lower()
@@ -2082,7 +2093,6 @@ policy: {policy}
             return False
 
         conflicting_storage_tokens = (
-            "sqlite",
             "postgres",
             "postgresql",
             "mysql",
@@ -2098,11 +2108,20 @@ policy: {policy}
         extracted = self._ralph_extract_project_dir(f"{prompt}\n{qa_block}")
         return extracted or ""
 
+    def _ralph_todo_storage_mode(self, prompt: str, qa_block: str = "") -> str:
+        text = f"{prompt}\n{qa_block}".lower()
+        if "sqlite" in text or "数据库" in text:
+            return "sqlite"
+        if "json" in text:
+            return "json"
+        return "json"
+
     def _ralph_concretize_flask_json_todo_story(
         self,
         story: dict,
         idx: int,
         output_dir: str = "",
+        storage_mode: str = "json",
     ) -> dict:
         normalized = self._ralph_normalize_story(story, idx)
         title = str(normalized.get("title") or "").strip()
@@ -2110,15 +2129,21 @@ policy: {policy}
         route_add = "/add"
         route_complete = "/complete/<id>"
         route_delete = "/delete/<id>"
-        if idx == 1 or any(token in combined for token in ("初始化", "基础架构", "bootstrap", "scaffold")):
+        uses_sqlite = storage_mode == "sqlite"
+        required_files = "pyproject.toml、app.py、templates/index.html、todo.db" if uses_sqlite else "pyproject.toml、app.py、templates/index.html、todos.json"
+        storage_bootstrap = "todo.db 初始化完成并可写入任务数据" if uses_sqlite else "todos.json 初始化为空数组 []"
+        add_persistence = "任务写入 SQLite 数据库" if uses_sqlite else "任务写入 todos.json 文件"
+        complete_persistence = "completed 状态写回 SQLite 数据库" if uses_sqlite else "completed 状态写回 todos.json"
+        delete_persistence = "SQLite 数据库中删除对应记录" if uses_sqlite else "todos.json 中删除对应记录"
+        if idx == 1 or any(token in combined for token in ("初始化", "基础结构", "基础架构", "bootstrap", "scaffold")):
             criteria = []
             if output_dir:
                 criteria.append(f"输出目录: {output_dir}")
             criteria.extend(
                 [
-                    "必须包含文件: pyproject.toml、app.py、templates/index.html、todos.json",
+                    f"必须包含文件: {required_files}",
                     "app.py 作为入口文件（不使用 main.py）",
-                    "todos.json 初始化为空数组 []",
+                    storage_bootstrap,
                     "启动命令: uv run python app.py",
                     "访问首页 / 返回 HTTP 200",
                     "Tests pass",
@@ -2136,7 +2161,7 @@ policy: {policy}
             normalized["acceptanceCriteria"] = [
                 "首页包含输入框和提交按钮",
                 f"提交表单到路由 POST {route_add}",
-                "任务写入 todos.json 文件",
+                add_persistence,
                 "刷新页面后仍能看到已添加的任务",
                 "空内容不可添加（前端或后端验证）",
                 "Tests pass",
@@ -2150,7 +2175,7 @@ policy: {policy}
             normalized["acceptanceCriteria"] = [
                 "每个任务有完成按钮或复选框",
                 f"提交到路由 POST {route_complete}",
-                "completed 状态写回 todos.json",
+                complete_persistence,
                 "刷新页面后完成状态保持",
                 "已完成任务有明显视觉样式区分（如删除线或灰色）",
                 "Tests pass",
@@ -2165,7 +2190,7 @@ policy: {policy}
                 "每个任务有删除按钮",
                 f"提交到路由 POST {route_delete}",
                 "页面上移除该任务",
-                "todos.json 中删除对应记录",
+                delete_persistence,
                 "刷新页面后删除的任务不再显示",
                 "Tests pass",
                 "Typecheck passes",
@@ -2174,7 +2199,7 @@ policy: {policy}
             return normalized
         return normalized
 
-    def _ralph_canonical_flask_json_todo_stories(self, output_dir: str = "") -> list[dict]:
+    def _ralph_canonical_flask_json_todo_stories(self, output_dir: str = "", storage_mode: str = "json") -> list[dict]:
         seeds = [
             {"id": "US-001", "title": "项目初始化与基础架构", "description": "初始化项目", "role": "engineer"},
             {"id": "US-002", "title": "新增任务功能", "description": "新增任务", "role": "engineer"},
@@ -2183,7 +2208,14 @@ policy: {policy}
         ]
         stories: list[dict] = []
         for idx, seed in enumerate(seeds, start=1):
-            stories.append(self._ralph_concretize_flask_json_todo_story(seed, idx, output_dir=output_dir))
+            stories.append(
+                self._ralph_concretize_flask_json_todo_story(
+                    seed,
+                    idx,
+                    output_dir=output_dir,
+                    storage_mode=storage_mode,
+                )
+            )
         return stories
 
     def _ralph_apply_prompt_constraints_to_prd(
@@ -2201,7 +2233,10 @@ policy: {policy}
         concrete_flask_todo = self._ralph_is_flask_json_todo_prompt(prompt, qa_block)
         default_simple_todo = self._ralph_is_default_simple_todo_prompt(prompt, qa_block)
         if (concrete_flask_todo or default_simple_todo) and not docs_only:
-            normalized_stories = self._ralph_canonical_flask_json_todo_stories(output_dir=output_dir)
+            normalized_stories = self._ralph_canonical_flask_json_todo_stories(
+                output_dir=output_dir,
+                storage_mode=self._ralph_todo_storage_mode(prompt, qa_block),
+            )
             prd["stories"] = normalized_stories
             prd["userStories"] = normalized_stories
             return prd
@@ -2433,7 +2468,135 @@ policy: {policy}
 
         replacement = f"{match.group(1)}\n\n{rendered_stories}\n"
         sanitized = section_pattern.sub(replacement, prd_md, count=1)
+        if self._ralph_is_canonical_todo_prd(prd):
+            sanitized = self._ralph_normalize_canonical_todo_prd_markdown(sanitized, prd)
         return sanitized.strip()
+
+    def _ralph_is_canonical_todo_prd(self, prd: dict) -> bool:
+        stories = prd.get("stories") or prd.get("userStories") or []
+        titles = [str(story.get("title") or "").strip() for story in stories if isinstance(story, dict)]
+        return titles == [
+            "项目初始化与基础架构",
+            "新增任务功能",
+            "完成任务功能",
+            "删除任务功能",
+        ]
+
+    def _ralph_extract_output_dir_from_prd(self, prd: dict) -> str:
+        stories = prd.get("stories") or prd.get("userStories") or []
+        for story in stories:
+            if not isinstance(story, dict):
+                continue
+            for item in story.get("acceptanceCriteria", []) or []:
+                text = str(item).strip()
+                if text.startswith("输出目录:"):
+                    output_dir = text.split(":", 1)[1].strip()
+                    if output_dir:
+                        return output_dir
+        return "project/todolist"
+
+    def _ralph_storage_mode_from_prd(self, prd: dict) -> str:
+        stories = prd.get("stories") or prd.get("userStories") or []
+        for story in stories:
+            if not isinstance(story, dict):
+                continue
+            criteria = " ".join(str(item).strip().lower() for item in story.get("acceptanceCriteria", []) or [])
+            if "sqlite" in criteria or "数据库" in criteria or "todo.db" in criteria:
+                return "sqlite"
+            if "todos.json" in criteria or "json" in criteria:
+                return "json"
+        return "json"
+
+    def _ralph_canonical_todo_prd_tail(self, prd: dict) -> str:
+        output_dir = self._ralph_extract_output_dir_from_prd(prd)
+        storage_mode = self._ralph_storage_mode_from_prd(prd)
+        data_file = "todo.db" if storage_mode == "sqlite" else "todos.json"
+        data_desc = "SQLite（标准库 `sqlite3`）" if storage_mode == "sqlite" else "JSON 文件"
+        persistence_requirement = "任务数据使用 SQLite 持久化存储" if storage_mode == "sqlite" else "任务数据使用 JSON 文件持久化存储"
+        restart_requirement = "重启应用后历史任务数据完整" if storage_mode == "sqlite" else "重启应用后 JSON 文件中的历史任务数据完整"
+        return (
+            "## 功能需求\n\n"
+            "| 编号 | 需求 | 优先级 |\n"
+            "|------|------|--------|\n"
+            "| F1 | 用户可通过 Web 界面新增任务 | 必须 |\n"
+            "| F2 | 用户可标记任务为已完成 | 必须 |\n"
+            "| F3 | 用户可删除任务 | 必须 |\n"
+            f"| F4 | {persistence_requirement} | 必须 |\n"
+            "| F5 | 应用启动时自动初始化存储层 | 必须 |\n"
+            "| F6 | 应用运行在 localhost:5000 | 必须 |\n\n"
+            "## 非目标\n\n"
+            "- 用户认证与多用户支持\n"
+            "- 任务优先级设置\n"
+            "- 任务截止日期\n"
+            "- 任务分类或标签\n"
+            "- 任务编辑功能\n"
+            "- 复杂前端框架或 SPA 改造\n"
+            "- API 接口设计\n\n"
+            "## 设计考量\n\n"
+            "- 界面采用极简 HTML，不引入外部 CSS 框架\n"
+            "- 使用少量内联样式保证已完成任务具备清晰视觉区分\n"
+            "- 表单操作采用传统 POST 请求，无需额外 JavaScript\n"
+            "- 页面刷新即可呈现最新数据状态，优先稳定性与跨平台可用性\n\n"
+            "## 技术考量\n\n"
+            "- **语言**：Python 3.12+\n"
+            "- **包管理**：uv\n"
+            "- **Web 框架**：Flask\n"
+            f"- **持久化**：{data_desc}\n"
+            "- **目录结构**：\n"
+            "  ```\n"
+            f"  {output_dir}/\n"
+            "  ├── pyproject.toml\n"
+            "  ├── app.py\n"
+            "  ├── templates/\n"
+            "  │   └── index.html\n"
+            "  ├── tests/\n"
+            "  │   └── test_app.py\n"
+            f"  └── {data_file}\n"
+            "  ```\n"
+            "- **跨平台**：使用 `pathlib.Path` 处理路径，避免硬编码分隔符\n\n"
+            "## 成功指标\n\n"
+            "- 执行 `uv run python app.py` 后应用正常启动\n"
+            "- 浏览器访问 `http://127.0.0.1:5000` 显示任务列表界面\n"
+            "- `pytest -q` 通过\n"
+            "- `mypy app.py` 通过\n"
+            f"- {restart_requirement}\n"
+            "- 在 macOS、Linux、Windows 上均可运行\n\n"
+            "## 待解决问题\n\n"
+            "无"
+        )
+
+    def _ralph_normalize_canonical_todo_prd_markdown(self, prd_md: str, prd: dict) -> str:
+        tail = self._ralph_canonical_todo_prd_tail(prd).strip()
+        normalized = prd_md.replace("├── main.py", "├── app.py")
+        normalized = normalized.replace("└── data.db (运行时生成)", "└── todo.db")
+        normalized = normalized.replace("`uv run main.py`", "`uv run python app.py`")
+        normalized = normalized.replace("data.db", "todo.db")
+        tail_pattern = re.compile(r"(^##\s+(?:功能需求|Functional Requirements)\s*$).*", re.MULTILINE | re.DOTALL)
+        if tail_pattern.search(normalized):
+            return tail_pattern.sub(tail, normalized, count=1).strip()
+        return f"{normalized.strip()}\n\n{tail}".strip()
+
+    def _ralph_archive_existing_project_dir(self, project_dir: Path) -> Path | None:
+        if not project_dir.exists():
+            project_dir.mkdir(parents=True, exist_ok=True)
+            return None
+        try:
+            has_content = any(project_dir.iterdir())
+        except Exception:
+            has_content = True
+        if not has_content:
+            project_dir.mkdir(parents=True, exist_ok=True)
+            return None
+
+        timestamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
+        backup_dir = project_dir.with_name(f"{project_dir.name}.bak-{timestamp}")
+        suffix = 1
+        while backup_dir.exists():
+            backup_dir = project_dir.with_name(f"{project_dir.name}.bak-{timestamp}-{suffix}")
+            suffix += 1
+        shutil.move(str(project_dir), str(backup_dir))
+        project_dir.mkdir(parents=True, exist_ok=True)
+        return backup_dir
 
     def _ralph_build_prd_ready_content(
         self,
@@ -2626,11 +2789,79 @@ policy: {policy}
             return "- (project directory is currently empty)"
         return "\n".join(f"- {entry}" for entry in entries)
 
-    def _ralph_story_requires_typecheck(self, story: dict) -> bool:
+    def _ralph_is_static_frontend_story(self, story: dict) -> bool:
+        text = "\n".join(
+            [
+                str(story.get("title") or ""),
+                str(story.get("description") or ""),
+                *[str(item) for item in story.get("acceptanceCriteria", []) or []],
+            ]
+        ).lower()
+        if not text.strip():
+            return False
+        frontend_signals = (
+            "index.html",
+            "style.css",
+            "app.js",
+            "localstorage",
+            "纯前端",
+            "浏览器直接运行",
+            "浏览器直接打开",
+            "html + css + javascript",
+            "html+css+javascript",
+            "原生 javascript",
+            "无需后端",
+            "no backend",
+            "browser directly",
+        )
+        if not any(token in text for token in frontend_signals):
+            return False
+        backend_signals = (
+            "app.py",
+            "main.py",
+            "pyproject.toml",
+            "templates/index.html",
+            "flask",
+            "fastapi",
+            "django",
+            "sqlite",
+            "todo.db",
+            "todos.json",
+            "uv run python",
+        )
+        return not any(token in text for token in backend_signals)
+
+    def _ralph_is_static_frontend_project(self, project_dir: Path) -> bool:
+        required_files = ("index.html", "style.css", "app.js")
+        if any(not (project_dir / name).is_file() for name in required_files):
+            return False
+        if (project_dir / "pyproject.toml").is_file():
+            return False
+        if self._ralph_is_frontend_typescript_project(project_dir):
+            return False
+        for path in project_dir.rglob("*.py"):
+            if not self._ralph_should_ignore_artifact(path, project_dir):
+                return False
+        return True
+
+    def _ralph_uses_static_frontend_verification(
+        self,
+        story: dict,
+        project_dir: Path | None = None,
+    ) -> bool:
+        return self._ralph_is_static_frontend_story(story) or (
+            project_dir is not None and self._ralph_is_static_frontend_project(project_dir)
+        )
+
+    def _ralph_story_requires_typecheck(self, story: dict, project_dir: Path | None = None) -> bool:
+        if self._ralph_uses_static_frontend_verification(story, project_dir):
+            return False
         criteria = [str(item).strip() for item in story.get("acceptanceCriteria", []) if str(item).strip()]
         return any("typecheck passes" in item.lower() for item in criteria)
 
-    def _ralph_story_requires_tests(self, story: dict) -> bool:
+    def _ralph_story_requires_tests(self, story: dict, project_dir: Path | None = None) -> bool:
+        if self._ralph_uses_static_frontend_verification(story, project_dir):
+            return False
         criteria = [str(item).strip() for item in story.get("acceptanceCriteria", []) if str(item).strip()]
         return any("tests pass" in item.lower() for item in criteria)
 
@@ -2846,11 +3077,14 @@ policy: {policy}
         return None
 
     def _ralph_seed_minimal_flask_route_test(self, project_dir: Path, story: dict) -> Path | None:
-        if not self._ralph_story_requires_tests(story):
+        if not self._ralph_story_requires_tests(story, project_dir):
             return None
         app_path = project_dir / "app.py"
+        import_stmt = "from app import app"
         if not app_path.is_file():
-            return None
+            app_path = project_dir / "app" / "main.py"
+            if not app_path.is_file():
+                return None
         tests_dir = project_dir / "tests"
         if tests_dir.is_dir() and any(tests_dir.rglob("test*.py")):
             return None
@@ -2862,7 +3096,7 @@ policy: {policy}
             return None
         test_path = tests_dir / "test_app.py"
         content = (
-            "from app import app\n\n"
+            f"{import_stmt}\n\n"
             "def test_index_returns_200() -> None:\n"
             "    app.config['TESTING'] = True\n"
             "    with app.test_client() as client:\n"
@@ -2877,7 +3111,7 @@ policy: {policy}
         return test_path
 
     def _ralph_seed_minimal_fastapi_route_test(self, project_dir: Path, story: dict) -> Path | None:
-        if not self._ralph_story_requires_tests(story):
+        if not self._ralph_story_requires_tests(story, project_dir):
             return None
         app_path = project_dir / "main.py"
         if not app_path.is_file():
@@ -2911,53 +3145,97 @@ policy: {policy}
 
     def _ralph_seed_minimal_flask_scaffold(self, project_dir: Path, story: dict) -> bool:
         criteria = "\n".join(str(item).strip() for item in story.get("acceptanceCriteria", []) if str(item).strip()).lower()
-        if "app.py" not in criteria or "templates/index.html" not in criteria or "todos.json" not in criteria:
+        uses_sqlite = "todo.db" in criteria or "sqlite" in criteria or "数据库" in criteria
+        requires_json = "todos.json" in criteria
+        if "app.py" not in criteria or "templates/index.html" not in criteria or (not uses_sqlite and not requires_json):
             return False
         if "http 200" not in criteria and "/" not in criteria and "首页" not in criteria:
-            return False
-        if (project_dir / "app.py").exists() or (project_dir / "templates" / "index.html").exists():
             return False
 
         app_path = project_dir / "app.py"
         template_path = project_dir / "templates" / "index.html"
         todos_path = project_dir / "todos.json"
+        db_path = project_dir / "todo.db"
         tests_path = project_dir / "tests" / "test_app.py"
-        app_source = (
-            '"""Todo List Web Application entry point."""\n\n'
-            "import json\n"
-            "from pathlib import Path\n"
-            "from typing import TypedDict\n\n"
-            "from flask import Flask, render_template\n"
-            "from flask.typing import ResponseReturnValue\n\n"
-            "class TodoItem(TypedDict):\n"
-            "    id: int\n"
-            "    content: str\n"
-            "    completed: bool\n\n"
-            "app = Flask(__name__)\n"
-            'TODOS_FILE = Path(__file__).parent / "todos.json"\n\n'
-            "def load_todos() -> list[TodoItem]:\n"
-            "    if not TODOS_FILE.exists():\n"
-            "        return []\n"
-            '    with TODOS_FILE.open("r", encoding="utf-8") as f:\n'
-            "        raw = json.load(f)\n"
-            "    if not isinstance(raw, list):\n"
-            "        return []\n"
-            "    todos: list[TodoItem] = []\n"
-            "    for item in raw:\n"
-            "        if not isinstance(item, dict):\n"
-            "            continue\n"
-            '        todo_id = item.get("id")\n'
-            '        content = item.get("content")\n'
-            '        completed = item.get("completed", False)\n'
-            "        if isinstance(todo_id, int) and isinstance(content, str) and isinstance(completed, bool):\n"
-            '            todos.append({"id": todo_id, "content": content, "completed": completed})\n'
-            "    return todos\n\n"
-            "@app.route('/')\n"
-            "def index() -> ResponseReturnValue:\n"
-            '    return render_template("index.html", todos=load_todos())\n\n'
-            'if __name__ == "__main__":\n'
-            "    app.run(debug=True, port=5000)\n"
-        )
+        if uses_sqlite:
+            app_source = (
+                '"""Todo List Web Application entry point."""\n\n'
+                "import sqlite3\n"
+                "from pathlib import Path\n"
+                "from typing import cast\n\n"
+                "from flask import Flask, g, render_template\n"
+                "from flask.typing import ResponseReturnValue\n\n"
+                "app = Flask(__name__)\n"
+                'DATABASE_PATH = Path(__file__).parent / "todo.db"\n\n'
+                "def get_db() -> sqlite3.Connection:\n"
+                '    if "db" not in g:\n'
+                "        g.db = sqlite3.connect(str(DATABASE_PATH))\n"
+                "        g.db.row_factory = sqlite3.Row\n"
+                '    return cast(sqlite3.Connection, g.db)\n\n'
+                "@app.teardown_appcontext\n"
+                "def close_db(exception: BaseException | None) -> None:\n"
+                '    db = g.pop("db", None)\n'
+                "    if db is not None:\n"
+                "        db.close()\n\n"
+                "def init_db() -> None:\n"
+                "    db = sqlite3.connect(str(DATABASE_PATH))\n"
+                "    db.execute(\n"
+                '        """\n'
+                "        CREATE TABLE IF NOT EXISTS todos (\n"
+                "            id INTEGER PRIMARY KEY AUTOINCREMENT,\n"
+                "            content TEXT NOT NULL,\n"
+                "            completed INTEGER DEFAULT 0\n"
+                "        )\n"
+                '        """\n'
+                "    )\n"
+                "    db.commit()\n"
+                "    db.close()\n\n"
+                "@app.route('/')\n"
+                "def index() -> ResponseReturnValue:\n"
+                "    init_db()\n"
+                "    todos = get_db().execute('SELECT id, content, completed FROM todos ORDER BY id').fetchall()\n"
+                '    return render_template("index.html", todos=todos)\n\n'
+                'if __name__ == "__main__":\n'
+                "    init_db()\n"
+                "    app.run(debug=True, port=5000)\n"
+            )
+        else:
+            app_source = (
+                '"""Todo List Web Application entry point."""\n\n'
+                "import json\n"
+                "from pathlib import Path\n"
+                "from typing import TypedDict\n\n"
+                "from flask import Flask, render_template\n"
+                "from flask.typing import ResponseReturnValue\n\n"
+                "class TodoItem(TypedDict):\n"
+                "    id: int\n"
+                "    content: str\n"
+                "    completed: bool\n\n"
+                "app = Flask(__name__)\n"
+                'TODOS_FILE = Path(__file__).parent / "todos.json"\n\n'
+                "def load_todos() -> list[TodoItem]:\n"
+                "    if not TODOS_FILE.exists():\n"
+                "        return []\n"
+                '    with TODOS_FILE.open("r", encoding="utf-8") as f:\n'
+                "        raw = json.load(f)\n"
+                "    if not isinstance(raw, list):\n"
+                "        return []\n"
+                "    todos: list[TodoItem] = []\n"
+                "    for item in raw:\n"
+                "        if not isinstance(item, dict):\n"
+                "            continue\n"
+                '        todo_id = item.get("id")\n'
+                '        content = item.get("content")\n'
+                '        completed = item.get("completed", False)\n'
+                "        if isinstance(todo_id, int) and isinstance(content, str) and isinstance(completed, bool):\n"
+                '            todos.append({"id": todo_id, "content": content, "completed": completed})\n'
+                "    return todos\n\n"
+                "@app.route('/')\n"
+                "def index() -> ResponseReturnValue:\n"
+                '    return render_template("index.html", todos=load_todos())\n\n'
+                'if __name__ == "__main__":\n'
+                "    app.run(debug=True, port=5000)\n"
+            )
         template_source = (
             "<!DOCTYPE html>\n"
             '<html lang="zh-CN">\n'
@@ -2990,16 +3268,29 @@ policy: {policy}
             "        response = typed_client.get('/')\n"
             "    assert response.status_code == 200\n"
         )
+        seeded = False
         try:
-            app_path.write_text(app_source, encoding="utf-8")
-            template_path.parent.mkdir(parents=True, exist_ok=True)
-            template_path.write_text(template_source, encoding="utf-8")
-            todos_path.write_text("[]\n", encoding="utf-8")
-            tests_path.parent.mkdir(parents=True, exist_ok=True)
-            tests_path.write_text(test_source, encoding="utf-8")
+            if not app_path.exists():
+                app_path.write_text(app_source, encoding="utf-8")
+                seeded = True
+            if not template_path.exists():
+                template_path.parent.mkdir(parents=True, exist_ok=True)
+                template_path.write_text(template_source, encoding="utf-8")
+                seeded = True
+            if uses_sqlite:
+                if not db_path.exists():
+                    db_path.write_bytes(b"")
+                    seeded = True
+            elif not todos_path.exists():
+                todos_path.write_text("[]\n", encoding="utf-8")
+                seeded = True
+            if not tests_path.exists():
+                tests_path.parent.mkdir(parents=True, exist_ok=True)
+                tests_path.write_text(test_source, encoding="utf-8")
+                seeded = True
         except Exception:
             return False
-        return True
+        return seeded
 
     def _ralph_route_signature(self, route: str) -> str:
         normalized = route.strip().lower()
@@ -3035,6 +3326,7 @@ policy: {policy}
         needs_add = "/add" in criteria_text
         needs_complete = "/complete/<id>" in criteria_text
         needs_delete = "/delete/<id>" in criteria_text
+        uses_sqlite = "todo.db" in criteria_text or "sqlite" in criteria_text or "数据库" in criteria_text
         if not needs_add and not needs_complete and not needs_delete:
             return []
 
@@ -3083,63 +3375,100 @@ policy: {policy}
         app_text = self._ralph_ensure_named_import(app_text, "flask", "redirect")
         app_text = self._ralph_ensure_named_import(app_text, "flask", "url_for")
 
-        save_todos_block = (
-            "def save_todos(todos: list[Any]) -> None:\n"
-            '    with TODOS_FILE.open("w", encoding="utf-8") as f:\n'
-            "        json.dump(todos, f, ensure_ascii=False, indent=2)\n"
-        )
-        save_todos_pattern = re.compile(
-            r"def save_todos\([^)]*\)\s*->\s*None:\n(?:    .*\n?)*",
-            re.MULTILINE,
-        )
-        save_todos_match = save_todos_pattern.search(app_text)
-        if save_todos_match:
-            existing_block = save_todos_match.group(0)
-            if "json.dump" not in existing_block:
-                app_text = app_text[: save_todos_match.start()] + save_todos_block + app_text[save_todos_match.end():]
-        elif needs_add or needs_complete or needs_delete:
-            load_todos_match = re.search(r"def load_todos\([^)]*\)\s*->\s*[^\n]+:\n(?:    .*\n?)*", app_text)
-            if load_todos_match:
-                insertion = app_text[: load_todos_match.end()] + "\n\n" + save_todos_block
-                app_text = insertion + app_text[load_todos_match.end():]
-            else:
-                app_text = self._ralph_insert_before_main_guard(app_text, save_todos_block)
+        if not uses_sqlite:
+            save_todos_block = (
+                "def save_todos(todos: list[Any]) -> None:\n"
+                '    with TODOS_FILE.open("w", encoding="utf-8") as f:\n'
+                "        json.dump(todos, f, ensure_ascii=False, indent=2)\n"
+            )
+            save_todos_pattern = re.compile(
+                r"def save_todos\([^)]*\)\s*->\s*None:\n(?:    .*\n?)*",
+                re.MULTILINE,
+            )
+            save_todos_match = save_todos_pattern.search(app_text)
+            if save_todos_match:
+                existing_block = save_todos_match.group(0)
+                if "json.dump" not in existing_block:
+                    app_text = app_text[: save_todos_match.start()] + save_todos_block + app_text[save_todos_match.end():]
+            elif needs_add or needs_complete or needs_delete:
+                load_todos_match = re.search(r"def load_todos\([^)]*\)\s*->\s*[^\n]+:\n(?:    .*\n?)*", app_text)
+                if load_todos_match:
+                    insertion = app_text[: load_todos_match.end()] + "\n\n" + save_todos_block
+                    app_text = insertion + app_text[load_todos_match.end():]
+                else:
+                    app_text = self._ralph_insert_before_main_guard(app_text, save_todos_block)
 
         route_blocks: list[str] = []
         if needs_add and '@app.route("/add", methods=["POST"])' not in app_text:
-            route_blocks.append(
-                '@app.route("/add", methods=["POST"])\n'
-                "def add_todo() -> Any:\n"
-                '    content = request.form.get("content", "").strip()\n'
-                "    if not content:\n"
-                '        return redirect(url_for("index"))\n'
-                "    todos = load_todos()\n"
-                '    next_id = max((todo.get("id", 0) for todo in todos if isinstance(todo.get("id"), int)), default=0) + 1\n'
-                '    todos.append({"id": next_id, "content": content, "completed": False})\n'
-                "    save_todos(todos)\n"
-                '    return redirect(url_for("index"))\n'
-            )
+            if uses_sqlite:
+                route_blocks.append(
+                    '@app.route("/add", methods=["POST"])\n'
+                    "def add_todo() -> Any:\n"
+                    '    content = request.form.get("content", "").strip()\n'
+                    "    if not content:\n"
+                    '        return redirect(url_for("index"))\n'
+                    "    init_db()\n"
+                    "    db = get_db()\n"
+                    '    db.execute("INSERT INTO todos (content, completed) VALUES (?, 0)", (content,))\n'
+                    "    db.commit()\n"
+                    '    return redirect(url_for("index"))\n'
+                )
+            else:
+                route_blocks.append(
+                    '@app.route("/add", methods=["POST"])\n'
+                    "def add_todo() -> Any:\n"
+                    '    content = request.form.get("content", "").strip()\n'
+                    "    if not content:\n"
+                    '        return redirect(url_for("index"))\n'
+                    "    todos = load_todos()\n"
+                    '    next_id = max((todo.get("id", 0) for todo in todos if isinstance(todo.get("id"), int)), default=0) + 1\n'
+                    '    todos.append({"id": next_id, "content": content, "completed": False})\n'
+                    "    save_todos(todos)\n"
+                    '    return redirect(url_for("index"))\n'
+                )
         if needs_complete and "/complete/<int:todo_id>" not in app_text:
-            route_blocks.append(
-                '@app.route("/complete/<int:todo_id>", methods=["POST"])\n'
-                "def complete_todo(todo_id: int) -> Any:\n"
-                "    todos = load_todos()\n"
-                "    for todo in todos:\n"
-                '        if todo.get("id") == todo_id:\n'
-                '            todo["completed"] = not bool(todo.get("completed", False))\n'
-                "            break\n"
-                "    save_todos(todos)\n"
-                '    return redirect(url_for("index"))\n'
-            )
+            if uses_sqlite:
+                route_blocks.append(
+                    '@app.route("/complete/<int:todo_id>", methods=["POST"])\n'
+                    "def complete_todo(todo_id: int) -> Any:\n"
+                    "    init_db()\n"
+                    "    db = get_db()\n"
+                    '    db.execute("UPDATE todos SET completed = CASE WHEN completed = 0 THEN 1 ELSE 0 END WHERE id = ?", (todo_id,))\n'
+                    "    db.commit()\n"
+                    '    return redirect(url_for("index"))\n'
+                )
+            else:
+                route_blocks.append(
+                    '@app.route("/complete/<int:todo_id>", methods=["POST"])\n'
+                    "def complete_todo(todo_id: int) -> Any:\n"
+                    "    todos = load_todos()\n"
+                    "    for todo in todos:\n"
+                    '        if todo.get("id") == todo_id:\n'
+                    '            todo["completed"] = not bool(todo.get("completed", False))\n'
+                    "            break\n"
+                    "    save_todos(todos)\n"
+                    '    return redirect(url_for("index"))\n'
+                )
         if needs_delete and "/delete/<int:todo_id>" not in app_text:
-            route_blocks.append(
-                '@app.route("/delete/<int:todo_id>", methods=["POST"])\n'
-                "def delete_todo(todo_id: int) -> Any:\n"
-                "    todos = load_todos()\n"
-                '    remaining = [todo for todo in todos if todo.get("id") != todo_id]\n'
-                "    save_todos(remaining)\n"
-                '    return redirect(url_for("index"))\n'
-            )
+            if uses_sqlite:
+                route_blocks.append(
+                    '@app.route("/delete/<int:todo_id>", methods=["POST"])\n'
+                    "def delete_todo(todo_id: int) -> Any:\n"
+                    "    init_db()\n"
+                    "    db = get_db()\n"
+                    '    db.execute("DELETE FROM todos WHERE id = ?", (todo_id,))\n'
+                    "    db.commit()\n"
+                    '    return redirect(url_for("index"))\n'
+                )
+            else:
+                route_blocks.append(
+                    '@app.route("/delete/<int:todo_id>", methods=["POST"])\n'
+                    "def delete_todo(todo_id: int) -> Any:\n"
+                    "    todos = load_todos()\n"
+                    '    remaining = [todo for todo in todos if todo.get("id") != todo_id]\n'
+                    "    save_todos(remaining)\n"
+                    '    return redirect(url_for("index"))\n'
+                )
         if route_blocks:
             app_text = self._ralph_insert_before_main_guard(app_text, "\n\n".join(route_blocks))
 
@@ -3209,14 +3538,29 @@ policy: {policy}
                 ]
             )
         if needs_complete or needs_delete:
-            replacement_lines = [
-                "{% for todo in todos %}",
-                '<li class="{% if todo.get(\'completed\', False) %}completed{% endif %}">',
-                "    <span>{{ todo.get('content', '') }}</span>",
-                *action_lines,
-                "</li>",
-                "{% endfor %}",
-            ]
+            if uses_sqlite:
+                replacement_lines = [
+                    "{% for todo in todos %}",
+                    '<li class="{% if todo.completed %}completed{% endif %}">',
+                    "    <span>{{ todo.content }}</span>",
+                    *[
+                        line.replace("todo.get('id', 0)", "todo.id")
+                        .replace("todo.get('completed', False)", "todo.completed")
+                        .replace("todo.get('content', '')", "todo.content")
+                        for line in action_lines
+                    ],
+                    "</li>",
+                    "{% endfor %}",
+                ]
+            else:
+                replacement_lines = [
+                    "{% for todo in todos %}",
+                    '<li class="{% if todo.get(\'completed\', False) %}completed{% endif %}">',
+                    "    <span>{{ todo.get('content', '') }}</span>",
+                    *action_lines,
+                    "</li>",
+                    "{% endfor %}",
+                ]
             replacement_loop = "\n".join(replacement_lines)
             if loop_pattern.search(template_text):
                 template_text = loop_pattern.sub(replacement_loop, template_text, count=1)
@@ -3225,57 +3569,120 @@ policy: {policy}
             else:
                 template_text = template_text.rstrip() + "\n<ul>\n" + replacement_loop + "\n</ul>\n"
 
-        tests_text = self._ralph_ensure_named_import(tests_text, "app", "load_todos")
-        tests_text = self._ralph_ensure_named_import(tests_text, "app", "save_todos")
+        if uses_sqlite:
+            tests_text = self._ralph_ensure_named_import(tests_text, "app", "DATABASE_PATH")
+            tests_text = self._ralph_ensure_named_import(tests_text, "app", "init_db")
+            if "import sqlite3" not in tests_text:
+                tests_text = "import sqlite3\n" + tests_text
+        else:
+            tests_text = self._ralph_ensure_named_import(tests_text, "app", "load_todos")
+            tests_text = self._ralph_ensure_named_import(tests_text, "app", "save_todos")
 
         if needs_add and "test_add_todo_success" not in tests_text:
-            tests_text = tests_text.rstrip() + (
-                "\n\n"
-                "def test_add_todo_success() -> None:\n"
-                "    app.config['TESTING'] = True\n"
-                "    save_todos([])\n"
-                "    try:\n"
-                "        with app.test_client() as client:\n"
-                "            response = client.post('/add', data={'content': 'Task'}, follow_redirects=True)\n"
-                "        assert response.status_code == 200\n"
-                "        todos = load_todos()\n"
-                "        assert len(todos) == 1\n"
-                "        assert todos[0]['content'] == 'Task'\n"
-                "        assert todos[0]['completed'] is False\n"
-                "    finally:\n"
-                "        save_todos([])\n"
-            )
+            if uses_sqlite:
+                tests_text = tests_text.rstrip() + (
+                    "\n\n"
+                    "def test_add_todo_success() -> None:\n"
+                    "    app.config['TESTING'] = True\n"
+                    "    init_db()\n"
+                    "    with sqlite3.connect(str(DATABASE_PATH)) as db:\n"
+                    "        db.execute('DELETE FROM todos')\n"
+                    "        db.commit()\n"
+                    "    with app.test_client() as client:\n"
+                    "        response = client.post('/add', data={'content': 'Task'}, follow_redirects=True)\n"
+                    "    assert response.status_code == 200\n"
+                    "    with sqlite3.connect(str(DATABASE_PATH)) as db:\n"
+                    "        row = db.execute('SELECT content, completed FROM todos ORDER BY id DESC LIMIT 1').fetchone()\n"
+                    "    assert row is not None\n"
+                    "    assert row[0] == 'Task'\n"
+                    "    assert row[1] == 0\n"
+                )
+            else:
+                tests_text = tests_text.rstrip() + (
+                    "\n\n"
+                    "def test_add_todo_success() -> None:\n"
+                    "    app.config['TESTING'] = True\n"
+                    "    save_todos([])\n"
+                    "    try:\n"
+                    "        with app.test_client() as client:\n"
+                    "            response = client.post('/add', data={'content': 'Task'}, follow_redirects=True)\n"
+                    "        assert response.status_code == 200\n"
+                    "        todos = load_todos()\n"
+                    "        assert len(todos) == 1\n"
+                    "        assert todos[0]['content'] == 'Task'\n"
+                    "        assert todos[0]['completed'] is False\n"
+                    "    finally:\n"
+                    "        save_todos([])\n"
+                )
 
         if needs_complete and "test_complete_toggles_todo" not in tests_text:
-            tests_text = tests_text.rstrip() + (
-                "\n\n"
-                "def test_complete_toggles_todo() -> None:\n"
-                "    app.config['TESTING'] = True\n"
-                '    save_todos([{"id": 1, "content": "Task", "completed": False}])\n'
-                "    try:\n"
-                "        with app.test_client() as client:\n"
-                "            response = client.post('/complete/1', follow_redirects=True)\n"
-                "        assert response.status_code == 200\n"
-                "        todos = load_todos()\n"
-                "        assert todos[0]['completed'] is True\n"
-                "    finally:\n"
-                "        save_todos([])\n"
-            )
+            if uses_sqlite:
+                tests_text = tests_text.rstrip() + (
+                    "\n\n"
+                    "def test_complete_toggles_todo() -> None:\n"
+                    "    app.config['TESTING'] = True\n"
+                    "    init_db()\n"
+                    "    with sqlite3.connect(str(DATABASE_PATH)) as db:\n"
+                    "        db.execute('DELETE FROM todos')\n"
+                    "        db.execute(\"INSERT INTO todos (id, content, completed) VALUES (1, 'Task', 0)\")\n"
+                    "        db.commit()\n"
+                    "    with app.test_client() as client:\n"
+                    "        response = client.post('/complete/1', follow_redirects=True)\n"
+                    "    assert response.status_code == 200\n"
+                    "    with sqlite3.connect(str(DATABASE_PATH)) as db:\n"
+                    "        row = db.execute('SELECT completed FROM todos WHERE id = 1').fetchone()\n"
+                    "    assert row is not None\n"
+                    "    assert row[0] == 1\n"
+                )
+            else:
+                tests_text = tests_text.rstrip() + (
+                    "\n\n"
+                    "def test_complete_toggles_todo() -> None:\n"
+                    "    app.config['TESTING'] = True\n"
+                    '    save_todos([{"id": 1, "content": "Task", "completed": False}])\n'
+                    "    try:\n"
+                    "        with app.test_client() as client:\n"
+                    "            response = client.post('/complete/1', follow_redirects=True)\n"
+                    "        assert response.status_code == 200\n"
+                    "        todos = load_todos()\n"
+                    "        assert todos[0]['completed'] is True\n"
+                    "    finally:\n"
+                    "        save_todos([])\n"
+                )
 
         if needs_delete and "test_delete_removes_todo" not in tests_text:
-            tests_text = tests_text.rstrip() + (
-                "\n\n"
-                "def test_delete_removes_todo() -> None:\n"
-                "    app.config['TESTING'] = True\n"
-                '    save_todos([{"id": 1, "content": "Task", "completed": False}])\n'
-                "    try:\n"
-                "        with app.test_client() as client:\n"
-                "            response = client.post('/delete/1', follow_redirects=True)\n"
-                "        assert response.status_code == 200\n"
-                "        assert load_todos() == []\n"
-                "    finally:\n"
-                "        save_todos([])\n"
-            )
+            if uses_sqlite:
+                tests_text = tests_text.rstrip() + (
+                    "\n\n"
+                    "def test_delete_removes_todo() -> None:\n"
+                    "    app.config['TESTING'] = True\n"
+                    "    init_db()\n"
+                    "    with sqlite3.connect(str(DATABASE_PATH)) as db:\n"
+                    "        db.execute('DELETE FROM todos')\n"
+                    "        db.execute(\"INSERT INTO todos (id, content, completed) VALUES (1, 'Task', 0)\")\n"
+                    "        db.commit()\n"
+                    "    with app.test_client() as client:\n"
+                    "        response = client.post('/delete/1', follow_redirects=True)\n"
+                    "    assert response.status_code == 200\n"
+                    "    with sqlite3.connect(str(DATABASE_PATH)) as db:\n"
+                    "        row = db.execute('SELECT COUNT(*) FROM todos WHERE id = 1').fetchone()\n"
+                    "    assert row is not None\n"
+                    "    assert row[0] == 0\n"
+                )
+            else:
+                tests_text = tests_text.rstrip() + (
+                    "\n\n"
+                    "def test_delete_removes_todo() -> None:\n"
+                    "    app.config['TESTING'] = True\n"
+                    '    save_todos([{"id": 1, "content": "Task", "completed": False}])\n'
+                    "    try:\n"
+                    "        with app.test_client() as client:\n"
+                    "            response = client.post('/delete/1', follow_redirects=True)\n"
+                    "        assert response.status_code == 200\n"
+                    "        assert load_todos() == []\n"
+                    "    finally:\n"
+                    "        save_todos([])\n"
+                )
 
         notes: list[str] = []
         try:
@@ -3312,7 +3719,7 @@ policy: {policy}
         return notes
 
     async def _ralph_prepare_typecheck_environment(self, project_dir: Path, story: dict) -> str:
-        if not self._ralph_story_requires_typecheck(story):
+        if not self._ralph_story_requires_typecheck(story, project_dir):
             return ""
         if not project_dir.exists():
             return ""
@@ -3327,7 +3734,7 @@ policy: {policy}
                 f"Normalized Flask ResponseReturnValue import in {normalized_response_return_value.name}"
             )
         if self._ralph_seed_minimal_flask_scaffold(project_dir, story):
-            notes.append("Seeded minimal Flask scaffold for the required app.py/templates/todos.json story artifacts")
+            notes.append("Seeded minimal Flask scaffold for the required bootstrap story artifacts")
         seeded_test = self._ralph_seed_minimal_flask_route_test(project_dir, story)
         if seeded_test is not None:
             notes.append(f"Seeded minimal Flask route test at {seeded_test.relative_to(project_dir)}")
@@ -3348,6 +3755,56 @@ policy: {policy}
             notes.append("Removed unsatisfiable types-Flask dependency for modern Flask built-in typing")
         if self._ralph_ensure_python_multipart_dependency(project_dir):
             notes.append('Patched pyproject.toml with "python-multipart" for FastAPI form handling')
+
+        if self._ralph_is_frontend_typescript_project(project_dir):
+            tsc_bins = [
+                project_dir / "node_modules" / ".bin" / "tsc",
+                project_dir / "node_modules" / ".bin" / "tsc.cmd",
+            ]
+            if any(path.is_file() for path in tsc_bins):
+                return "\n\n".join(notes)
+
+            install_commands: list[list[str]] = []
+            if (project_dir / "package-lock.json").is_file():
+                install_commands.append(["npm", "ci"])
+            install_commands.append(["npm", "install"])
+            seen_commands: set[tuple[str, ...]] = set()
+            for command in install_commands:
+                key = tuple(command)
+                if key in seen_commands:
+                    continue
+                seen_commands.add(key)
+                try:
+                    proc = await asyncio.create_subprocess_exec(
+                        *command,
+                        cwd=str(project_dir),
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.STDOUT,
+                    )
+                    stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=90)
+                except Exception as exc:
+                    notes.append(f"$ {' '.join(command)}\n{exc}")
+                    continue
+
+                output = stdout.decode("utf-8", errors="replace").strip()
+                trimmed = output[-1200:] if len(output) > 1200 else output
+                if trimmed:
+                    notes.append(f"$ {' '.join(command)}\n{trimmed}")
+                if proc.returncode == 0:
+                    return "\n\n".join(notes)
+            return "\n\n".join(notes)
+
+        def _missing_dev_tool_bins() -> list[str]:
+            required: list[str] = []
+            if self._ralph_story_requires_typecheck(story, project_dir):
+                required.append("mypy")
+            if self._ralph_story_requires_tests(story, project_dir):
+                required.append("pytest")
+            missing: list[str] = []
+            for tool in required:
+                if not (project_dir / ".venv" / "bin" / tool).exists():
+                    missing.append(tool)
+            return missing
 
         sync_commands = [
             ["uv", "sync", "--extra", "dev"],
@@ -3376,19 +3833,44 @@ policy: {policy}
                 if output:
                     trimmed = output[-1200:] if len(output) > 1200 else output
                     notes.append(f"$ {' '.join(command)}\n{trimmed}")
+                missing_bins = _missing_dev_tool_bins()
+                if missing_bins:
+                    bootstrap_cmd = ["uv", "pip", "install", *missing_bins]
+                    try:
+                        bootstrap_proc = await asyncio.create_subprocess_exec(
+                            *bootstrap_cmd,
+                            cwd=str(project_dir),
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.STDOUT,
+                        )
+                        bootstrap_stdout, _ = await asyncio.wait_for(bootstrap_proc.communicate(), timeout=60)
+                        bootstrap_output = bootstrap_stdout.decode("utf-8", errors="replace").strip()
+                        trimmed_bootstrap = bootstrap_output[-1200:] if len(bootstrap_output) > 1200 else bootstrap_output
+                        if bootstrap_proc.returncode == 0:
+                            if trimmed_bootstrap:
+                                notes.append(f"$ {' '.join(bootstrap_cmd)}\n{trimmed_bootstrap}")
+                            notes.append(
+                                f"Bootstrapped missing dev tool wrappers: {', '.join(missing_bins)}"
+                            )
+                        else:
+                            notes.append(f"$ {' '.join(bootstrap_cmd)}\n{trimmed_bootstrap}")
+                    except Exception as exc:
+                        notes.append(f"$ {' '.join(bootstrap_cmd)}\n{exc}")
                 return "\n\n".join(notes)
             trimmed = output[-1200:] if len(output) > 1200 else output
             notes.append(f"$ {' '.join(command)}\n{trimmed}")
         return "\n\n".join(notes)
 
     async def _ralph_collect_verification_evidence(self, project_dir: Path, story: dict) -> str:
-        if not self._ralph_story_requires_typecheck(story) and not self._ralph_story_requires_tests(story):
+        if not self._ralph_story_requires_typecheck(story, project_dir) and not self._ralph_story_requires_tests(story, project_dir):
             semantic_gaps = self._ralph_semantic_acceptance_gaps(project_dir, story)
             if semantic_gaps:
                 return "Acceptance gaps:\n" + "\n".join(f"- {gap}" for gap in semantic_gaps)
             return ""
         if not project_dir.exists():
             return ""
+
+        self._ralph_ensure_declared_readme_exists(project_dir)
 
         target = "."
         if (project_dir / "app").is_dir():
@@ -3431,7 +3913,7 @@ policy: {policy}
 
         success_evidence: list[str] = []
 
-        if self._ralph_story_requires_typecheck(story):
+        if self._ralph_story_requires_typecheck(story, project_dir):
             typecheck_commands = self._ralph_verification_commands(project_dir, "mypy", target)
             ok, evidence = await _collect_group(typecheck_commands)
             if ok is False:
@@ -3439,7 +3921,7 @@ policy: {policy}
             if evidence:
                 success_evidence.append(evidence)
 
-        if self._ralph_story_requires_tests(story):
+        if self._ralph_story_requires_tests(story, project_dir):
             test_commands = self._ralph_verification_commands(project_dir, "pytest", "-q")
             ok, evidence = await _collect_group(test_commands)
             if ok is False:
@@ -3455,13 +3937,33 @@ policy: {policy}
 
         return "\n\n".join(part for part in success_evidence if part).strip()
 
+    async def _ralph_prepare_and_recheck_verification(
+        self,
+        project_dir: Path,
+        story: dict,
+    ) -> tuple[bool, str]:
+        verification_passed = await self._ralph_verification_passed(project_dir=project_dir, story=story)
+        if verification_passed:
+            return True, ""
+        prep_evidence = await self._ralph_prepare_typecheck_environment(
+            project_dir=project_dir,
+            story=story,
+        )
+        if prep_evidence:
+            verification_passed = await self._ralph_verification_passed(project_dir=project_dir, story=story)
+        return verification_passed, prep_evidence
+
     async def _ralph_verification_passed(self, project_dir: Path, story: dict) -> bool:
-        require_typecheck = self._ralph_story_requires_typecheck(story)
-        require_tests = self._ralph_story_requires_tests(story)
-        if not require_typecheck and not require_tests:
-            return True
+        require_typecheck = self._ralph_story_requires_typecheck(story, project_dir)
+        require_tests = self._ralph_story_requires_tests(story, project_dir)
         if not project_dir.exists():
             return False
+        if not require_typecheck and not require_tests:
+            if self._ralph_uses_static_frontend_verification(story, project_dir):
+                return not self._ralph_semantic_acceptance_gaps(project_dir, story)
+            return True
+
+        self._ralph_ensure_declared_readme_exists(project_dir)
 
         target = "."
         if (project_dir / "app").is_dir():
@@ -3502,7 +4004,7 @@ policy: {policy}
         return True
 
     def _ralph_control_roots(self) -> set[str]:
-        return {".git", ".venv", ".pytest_cache", ".mypy_cache", "__pycache__", "tasks"}
+        return {".git", ".venv", ".pytest_cache", ".mypy_cache", "__pycache__", "node_modules", "tasks"}
 
     def _ralph_control_files(self) -> set[str]:
         return {
@@ -3557,7 +4059,46 @@ policy: {policy}
         extra = optional_dependencies.get(extra_name)
         return isinstance(extra, list) and bool(extra)
 
+    def _ralph_is_frontend_typescript_project(self, project_dir: Path) -> bool:
+        if not (project_dir / "package.json").is_file():
+            return False
+        if (project_dir / "pyproject.toml").is_file():
+            return False
+        if (project_dir / "tsconfig.json").is_file():
+            return True
+        for pattern in ("*.ts", "*.tsx"):
+            if any(project_dir.glob(pattern)):
+                return True
+        return False
+
     def _ralph_verification_commands(self, project_dir: Path, tool: str, *args: str) -> list[list[str]]:
+        if tool == "mypy" and self._ralph_is_frontend_typescript_project(project_dir):
+            commands: list[list[str]] = []
+            seen_commands: set[tuple[str, ...]] = set()
+            tsc_candidates = [
+                project_dir / "node_modules" / ".bin" / "tsc",
+                project_dir / "node_modules" / ".bin" / "tsc.cmd",
+            ]
+            for tsc_bin in tsc_candidates:
+                if not tsc_bin.is_file():
+                    continue
+                command = (str(tsc_bin), "--noEmit")
+                if command in seen_commands:
+                    continue
+                seen_commands.add(command)
+                commands.append(list(command))
+            for command in (
+                ["npm", "run", "typecheck"],
+                ["npm", "exec", "--", "tsc", "--noEmit"],
+                ["npx", "tsc", "--noEmit"],
+            ):
+                key = tuple(command)
+                if key in seen_commands:
+                    continue
+                seen_commands.add(key)
+                commands.append(command)
+            return commands
+
         commands: list[list[str]] = []
         venv_candidates = [
             project_dir / ".venv" / "bin" / tool,
@@ -3785,7 +4326,7 @@ policy: {policy}
         tests_dir = project_dir / "tests"
         is_scaffold_story = any(
             token in combined_text
-            for token in ("脚手架", "初始化", "scaffold", "bootstrap", "uv init", "health")
+            for token in ("脚手架", "初始化", "基础结构", "基础架构", "scaffold", "bootstrap", "uv init", "health")
         )
 
         source_candidates: list[Path] = []
@@ -3865,11 +4406,20 @@ policy: {policy}
                 mypy_fix_hints.append("Add the missing generic type parameters instead of leaving the container type implicit.")
             elif (
                 "incompatible return value type" in lowered_mypy
-                and "got \"response\"" in lowered_mypy
-                and ("expected \"str\"" in lowered_mypy or "expected \"tuple[str, int]\"" in lowered_mypy)
+                and (
+                    "got \"response\"" in lowered_mypy
+                    or "got \"str\"" in lowered_mypy
+                    or "render_template" in lowered_output
+                    or "jsonify" in lowered_output
+                )
+                and (
+                    "expected \"str\"" in lowered_mypy
+                    or "expected \"response\"" in lowered_mypy
+                    or "expected \"tuple[str, int]\"" in lowered_mypy
+                )
             ):
                 mypy_fix_hints.append(
-                    "For Flask routes that return `redirect(...)` or `render_template(...)`, annotate the handler with `ResponseReturnValue` from `flask.typing` instead of `str`."
+                    "For Flask routes that return `redirect(...)`, `render_template(...)`, or `jsonify(...)`, annotate the handler with `ResponseReturnValue` from `flask.typing` instead of a narrow `str` or `Response` return type."
                 )
             elif (
                 "module \"flask\" has no attribute \"responsereturnvalue\"" in lowered_mypy
@@ -3971,7 +4521,7 @@ policy: {policy}
             )
         declared_lower = pyproject_text.lower()
         is_test_context = (
-            self._ralph_story_requires_tests(story)
+            self._ralph_story_requires_tests(story, project_dir)
             or "testclient" in lowered_output
             or "tests/" in lowered_output
             or "test_" in lowered_output
@@ -4051,19 +4601,26 @@ policy: {policy}
             )
 
         verification_requirement_hints: list[str] = []
-        if self._ralph_story_requires_tests(story):
+        if self._ralph_story_requires_tests(story, project_dir):
             verification_requirement_hints.append(
                 "This story is not complete until at least one real pytest test file exists and `pytest -q` exits with status 0."
             )
-            if not tests_dir.is_dir() or not any(tests_dir.rglob("test*.py")):
+            missing_tests = not tests_dir.is_dir() or not any(tests_dir.rglob("test*.py"))
+            if missing_tests:
                 verification_requirement_hints.append(
                     "Create or update tests under `tests/` (for example `tests/test_<feature>.py`) before you stop."
                 )
+                if (project_dir / "app" / "main.py").is_file():
+                    source_candidates.insert(0, project_dir / "app" / "main.py")
+                    source_candidates.insert(1, project_dir / "tests" / "test_app.py")
+                    verification_requirement_hints.append(
+                        "This project uses a package Flask entrypoint under `app/main.py`; create `tests/test_app.py` and import the app package before rerunning pytest."
+                    )
             if "no tests ran" in lowered_output:
                 verification_requirement_hints.append(
                     "`pytest -q` returning `no tests ran` is a failure for this story; add or fix tests until pytest actually executes and passes."
                 )
-        if self._ralph_story_requires_typecheck(story):
+        if self._ralph_story_requires_typecheck(story, project_dir):
             verification_requirement_hints.append(
                 "This story is not complete until the required mypy run exits with status 0 after your changes."
             )
@@ -4171,7 +4728,7 @@ policy: {policy}
             )
         for hint in verification_requirement_hints:
             lines.append(hint)
-        if is_scaffold_story and self._ralph_story_requires_tests(story):
+        if is_scaffold_story and self._ralph_story_requires_tests(story, project_dir):
             lines.append(
                 "For this Flask scaffold story, create `tests/test_app.py` with at least one real route test before stopping."
             )
@@ -4369,7 +4926,7 @@ policy: {policy}
                     continue
                 narrowed.append(path)
             deduped = narrowed
-            if str(project_dir) not in {str(path) for path in deduped}:
+            if not deduped and str(project_dir) not in {str(path) for path in deduped}:
                 deduped.append(project_dir)
         return deduped
 
@@ -4504,7 +5061,7 @@ policy: {policy}
             return False
         if not changed_artifacts:
             return False
-        if self._ralph_story_requires_typecheck(story) and not verification_passed:
+        if self._ralph_story_requires_typecheck(story, project_dir) and not verification_passed:
             return False
         if not self._ralph_autofinalize_completion_guard(story, project_dir):
             return False
@@ -4552,9 +5109,12 @@ policy: {policy}
 
         html_bodies: list[str] = []
         python_bodies: list[str] = []
+        javascript_bodies: list[str] = []
+        artifact_names: set[str] = set()
         for path in project_dir.rglob("*"):
             if not path.is_file() or self._ralph_should_ignore_artifact(path, project_dir):
                 continue
+            artifact_names.add(path.name.lower())
             try:
                 body = path.read_text(encoding="utf-8").lower()
             except Exception:
@@ -4563,12 +5123,88 @@ policy: {policy}
                 python_bodies.append(body)
             elif path.suffix.lower() in {".html", ".htm", ".jinja", ".j2"}:
                 html_bodies.append(body)
+            elif path.suffix.lower() == ".js":
+                javascript_bodies.append(body)
 
         def python_contains(token: str) -> bool:
             return any(token in body for body in python_bodies)
 
         def html_contains_any(*tokens: str) -> bool:
             return any(any(token in body for token in tokens) for body in html_bodies)
+
+        def javascript_contains_any(*tokens: str) -> bool:
+            return any(any(token in body for token in tokens) for body in javascript_bodies)
+
+        def html_matches_any(*patterns: str) -> bool:
+            return any(any(re.search(pattern, body) for pattern in patterns) for body in html_bodies)
+
+        def javascript_matches_any(*patterns: str) -> bool:
+            return any(any(re.search(pattern, body) for pattern in patterns) for body in javascript_bodies)
+
+        def has_completion_control() -> bool:
+            return html_matches_any(
+                r"type\s*=\s*[\"']checkbox[\"']",
+                r"(?:aria-label|title|class|id|data-action)\s*=\s*[\"'][^\"']*(?:complete|completed|toggle|done|完成)[^\"']*[\"']",
+                r">\s*(?:完成|complete|done|toggle)\s*<",
+            ) or javascript_matches_any(
+                r"createelement\(\s*[\"']input[\"']\s*\)",
+                r"\.type\s*=\s*[\"']checkbox[\"']",
+                r"\b(?:toggletask|completetask|markcomplete|togglecomplete|togglecompleted)\b",
+                r"(?:textcontent|innertext|innerhtml)\s*=\s*[\"'][^\"']*(?:完成|complete|done|toggle)[^\"']*[\"']",
+                r"(?:classname|id)\s*=\s*[\"'][^\"']*(?:complete|completed|toggle|done)[^\"']*[\"']",
+                r"\.classlist\.(?:add|toggle)\(\s*[\"'][^\"']*(?:complete|completed|done)[^\"']*[\"']\s*\)",
+            )
+
+        def has_delete_control() -> bool:
+            return html_matches_any(
+                r"(?:aria-label|title|class|id|data-action)\s*=\s*[\"'][^\"']*(?:delete|remove)[^\"']*[\"']",
+                r">\s*(?:删除|delete|remove)\s*<",
+            ) or javascript_matches_any(
+                r"\b(?:deletetask|removetask|handledelete|deleteitem|removeitem)\b",
+                r"(?:textcontent|innertext|innerhtml)\s*=\s*[\"'][^\"']*(?:删除|delete|remove)[^\"']*[\"']",
+                r"(?:classname|id)\s*=\s*[\"'][^\"']*(?:delete|remove)[^\"']*[\"']",
+                r"\.remove\(\)",
+            )
+
+        def has_localstorage_write() -> bool:
+            return html_matches_any(
+                r"localstorage\.(?:setitem|removeitem)\s*\(",
+                r"localstorage\s*\[[^\]]+\]\s*=",
+            ) or javascript_matches_any(
+                r"localstorage\.(?:setitem|removeitem)\s*\(",
+                r"localstorage\s*\[[^\]]+\]\s*=",
+            )
+
+        def has_localstorage_read() -> bool:
+            return html_matches_any(
+                r"localstorage\.getitem\s*\(",
+                r"json\.parse\(\s*localstorage",
+            ) or javascript_matches_any(
+                r"localstorage\.getitem\s*\(",
+                r"json\.parse\(\s*localstorage",
+            )
+
+        def has_add_item_interaction() -> bool:
+            interaction_trigger = html_matches_any(
+                r"onclick\s*=\s*[\"'][^\"']*(?:add|create|submit)[^\"']*[\"']",
+                r"onsubmit\s*=",
+            ) or javascript_matches_any(
+                r"addeventlistener\(\s*[\"']click[\"']",
+                r"addeventlistener\(\s*[\"']keydown[\"']",
+                r"addeventlistener\(\s*[\"']keypress[\"']",
+                r"addeventlistener\(\s*[\"']submit[\"']",
+            )
+            item_render = javascript_matches_any(
+                r"\.appendchild\(",
+                r"\.append\(",
+                r"\.prepend\(",
+                r"\.insertadjacenthtml\(",
+                r"\.insertadjacentelement\(",
+                r"\.innerhtml\s*=",
+                r"createelement\(\s*[\"']li[\"']",
+                r"\b(?:todos|tasks|items)\.(?:push|unshift)\(",
+            )
+            return interaction_trigger and item_render
 
         def route_exists(route: str) -> bool:
             normalized = route.strip().lower()
@@ -4583,7 +5219,112 @@ policy: {policy}
                         return True
             return False
 
+        explicit_static_files = tuple(
+            dict.fromkeys(
+                name.lower()
+                for name in re.findall(r"(?:index|style|app|script)\.[a-z0-9]+", text)
+            )
+        )
+        explicit_script_files = tuple(name for name in explicit_static_files if name.endswith('.js'))
+        explicit_style_files = tuple(name for name in explicit_static_files if name.endswith('.css'))
+
         gaps: list[str] = []
+
+        if self._ralph_is_static_frontend_story(story):
+            requires_split_static_assets = any(
+                token in text
+                for token in (
+                    "style.css",
+                    "app.js",
+                    "引入 style.css",
+                    "引入 app.js",
+                    "must include file",
+                    "must include files",
+                    "必须包含文件",
+                    "目录结构",
+                    "多文件",
+                    "html + css + js 分离",
+                    "html + css + javascript 分离",
+                    "html、css、js 三个文件",
+                    "包含 index.html、style.css、app.js",
+                )
+            )
+
+            required_static_files = ("index.html",)
+            required_style_files = explicit_style_files or (("style.css",) if requires_split_static_assets else ())
+            required_script_files = explicit_script_files or (("app.js",) if requires_split_static_assets else ())
+            required_static_files += required_style_files + required_script_files
+            for filename in dict.fromkeys(required_static_files):
+                if filename not in artifact_names:
+                    gaps.append(f"Missing static frontend artifact: {filename}")
+
+            if requires_split_static_assets and any(
+                token in text
+                for token in (
+                    "style.css",
+                    "app.js",
+                    "script.js",
+                    "html should correctly import css/js",
+                    "正确引入 css",
+                    "正确引入 js",
+                    "引入 style.css",
+                    "引入 app.js",
+                    "引入 script.js",
+                )
+            ):
+                for style_file in required_style_files:
+                    if style_file in artifact_names and not html_contains_any(
+                        f'href="{style_file}"',
+                        f"href='{style_file}'",
+                    ):
+                        gaps.append(f"index.html is missing stylesheet reference to {style_file}")
+                for script_file in required_script_files:
+                    if script_file in artifact_names and not html_contains_any(
+                        f'src="{script_file}"',
+                        f"src='{script_file}'",
+                    ):
+                        gaps.append(f"index.html is missing script reference to {script_file}")
+
+            is_bootstrap_story = any(
+                token in text for token in ("初始化", "基础结构", "bootstrap", "scaffold", "基础架构")
+            )
+            is_add_item_story = any(
+                token in text
+                for token in ("新增", "添加", "add todo", "add task", "add item", "new todo", "new task")
+            )
+
+            if is_add_item_story and any(
+                token in text for token in ("点击添加按钮", "按回车键", "回车键", "新事项显示", "输入框提交后自动清空")
+            ) and not has_add_item_interaction():
+                gaps.append("Missing add-item interaction logic in UI")
+
+            if is_add_item_story and "createdat" in text and not (
+                javascript_contains_any("createdat", "created_at")
+                or html_contains_any("createdat", "created_at")
+            ):
+                gaps.append("Missing todo item field implementation: createdAt")
+
+            if "localstorage" in text:
+                requires_localstorage_write = (
+                    is_add_item_story
+                    and not is_bootstrap_story
+                    and any(token in text for token in ("保存", "自动保存", "持久化", "写入", "setitem"))
+                )
+                requires_localstorage_read = any(
+                    token in text
+                    for token in ("页面刷新后数据保留", "刷新页面后", "页面加载时", "读取历史数据", "恢复", "reload", "load")
+                )
+                if requires_localstorage_write and not has_localstorage_write():
+                    gaps.append("Missing LocalStorage write path in frontend implementation")
+                if requires_localstorage_read and not has_localstorage_read():
+                    gaps.append("Missing LocalStorage read path in frontend implementation")
+                if (
+                    not requires_localstorage_write
+                    and not requires_localstorage_read
+                    and not (has_localstorage_write() or has_localstorage_read())
+                ):
+                    gaps.append("Missing LocalStorage persistence logic in app.js")
+
         explicit_routes = self._ralph_extract_explicit_http_routes(story)
         for route in dict.fromkeys(explicit_routes):
             if not route_exists(route):
@@ -4601,19 +5342,10 @@ policy: {policy}
         ):
             gaps.append("Missing homepage submit button")
 
-        if any(token in text for token in ("完成按钮", "复选框", "checkbox")) and not html_contains_any(
-            "checkbox",
-            "/complete",
-            "完成",
-            "complete",
-        ):
+        if any(token in text for token in ("完成按钮", "复选框", "checkbox")) and not has_completion_control():
             gaps.append("Missing completion control in UI")
 
-        if any(token in text for token in ("删除按钮", "delete button")) and not html_contains_any(
-            "/delete",
-            "删除",
-            "delete",
-        ):
+        if any(token in text for token in ("删除按钮", "delete button")) and not has_delete_control():
             gaps.append("Missing delete control in UI")
 
         requires_todo_write = (
@@ -4692,6 +5424,29 @@ policy: {policy}
                     return True
             return False
 
+        def has_embedded_db_logic() -> bool:
+            db_candidates = [
+                project_dir / "app.py",
+                project_dir / "main.py",
+                project_dir / "models.py",
+                project_dir / "database.py",
+                project_dir / "db.py",
+            ]
+            for root_name in ("app", "src"):
+                root_dir = project_dir / root_name
+                if root_dir.is_dir():
+                    db_candidates.extend(root_dir.rglob("*.py"))
+            for path in db_candidates:
+                if not path.is_file():
+                    continue
+                try:
+                    body = path.read_text(encoding="utf-8").lower()
+                except Exception:
+                    continue
+                if any(token in body for token in ("sqlite", "sqlalchemy", "init_db", "create table", "task")):
+                    return True
+            return False
+
         text = "\n".join(
             [
                 str(story.get("title") or ""),
@@ -4701,9 +5456,16 @@ policy: {policy}
         ).lower()
         requires_app_py_only = "app.py 作为入口文件" in text and "不使用 main.py" in text
 
-        is_bootstrap_story = any(token in text for token in ("初始化", "bootstrap", "scaffold", "基础架构"))
+        is_bootstrap_story = any(token in text for token in ("初始化", "基础结构", "bootstrap", "scaffold", "基础架构"))
 
         if is_bootstrap_story:
+            if self._ralph_is_static_frontend_story(story):
+                if self._ralph_missing_explicit_artifact_paths(story, project_dir):
+                    return False
+                if self._ralph_semantic_acceptance_gaps(project_dir, story):
+                    return False
+                return True
+
             has_package_dir = (project_dir / "app").is_dir() or (project_dir / "src").is_dir()
             has_root_web_layout = (
                 (project_dir / "main.py").is_file()
@@ -4738,31 +5500,9 @@ policy: {policy}
                 )
             )
             if requires_db_bootstrap:
-                has_embedded_db_logic = False
-                db_candidates = [
-                    project_dir / "app.py",
-                    project_dir / "main.py",
-                    project_dir / "models.py",
-                    project_dir / "database.py",
-                    project_dir / "db.py",
-                ]
-                for root_name in ("app", "src"):
-                    root_dir = project_dir / root_name
-                    if root_dir.is_dir():
-                        db_candidates.extend(root_dir.rglob("*.py"))
-                for path in db_candidates:
-                    if not path.is_file():
-                        continue
-                    try:
-                        body = path.read_text(encoding="utf-8").lower()
-                    except Exception:
-                        continue
-                    if any(token in body for token in ("sqlite", "sqlalchemy", "init_db", "create table", "task")):
-                        has_embedded_db_logic = True
-                        break
-                if not has_embedded_db_logic:
+                if not has_embedded_db_logic():
                     return False
-            if self._ralph_story_requires_tests(story):
+            if self._ralph_story_requires_tests(story, project_dir):
                 tests_dir = project_dir / "tests"
                 if not tests_dir.is_dir() or not any(tests_dir.rglob("test_*.py")):
                     return False
@@ -4773,15 +5513,17 @@ policy: {policy}
         if any(token in text for token in ("model", "模型")):
             if not (has_named_python("models.py") or has_inline_model_definition()):
                 return False
-        if any(token in text for token in ("数据库", "database", "sqlite", "持久化")):
-            if not has_named_python("database.py", "db.py"):
+        if any(token in text for token in ("数据库", "database", "sqlite")) or (
+            "持久化" in text and not self._ralph_uses_static_frontend_verification(story, project_dir)
+        ):
+            if not (has_named_python("database.py", "db.py") or has_embedded_db_logic()):
                 return False
 
         if any(token in text for token in (" api", "api ", "接口", "endpoint", "route", "router", "crud")):
             if not (has_named_python("main.py", "api.py") or any((project_dir / root).is_dir() for root in ("routers", "routes", "api"))):
                 return False
 
-        if self._ralph_story_requires_tests(story):
+        if self._ralph_story_requires_tests(story, project_dir):
             tests_dir = project_dir / "tests"
             if not tests_dir.is_dir() or not any(tests_dir.rglob("test_*.py")):
                 return False
@@ -4880,6 +5622,7 @@ policy: {policy}
             prompt_cancel_reason = ""
             auto_finalized = False
             verification_failure_cancelled = False
+            verification_failure_streak = 0
             try:
                 last_activity = asyncio.get_running_loop().time()
                 activity_clock = {"last": last_activity}
@@ -4888,7 +5631,9 @@ policy: {policy}
                 activity_snapshot = self._ralph_snapshot_artifacts(activity_paths)
                 artifact_snapshot = self._ralph_snapshot_artifacts(artifact_paths)
                 artifact_watch_started: float | None = None
-                observed_artifacts: list[Path] = []
+                observed_artifacts: list[Path] = self._ralph_materialized_artifacts(artifact_paths)
+                if observed_artifacts:
+                    artifact_watch_started = last_activity
 
                 async def mark_prompt_activity(*_args, **_kwargs):
                     activity_clock["last"] = asyncio.get_running_loop().time()
@@ -4925,6 +5670,7 @@ policy: {policy}
                         observed_activity = True
                         last_activity = now
                         artifact_watch_started = now
+                        verification_failure_streak = 0
                         activity_snapshot = self._ralph_snapshot_artifacts(activity_paths)
                         artifact_snapshot = self._ralph_snapshot_artifacts(artifact_paths)
 
@@ -4933,6 +5679,7 @@ policy: {policy}
                         observed_activity = True
                         last_activity = now
                         artifact_watch_started = now
+                        verification_failure_streak = 0
                         activity_snapshot = self._ralph_snapshot_artifacts(activity_paths)
 
                     changed_artifacts = self._ralph_changed_artifacts(artifact_paths, artifact_snapshot)
@@ -4940,12 +5687,13 @@ policy: {policy}
                         observed_activity = True
                         last_activity = now
                         artifact_watch_started = now
+                        verification_failure_streak = 0
                         for path in changed_artifacts:
                             if not any(str(path) == str(item) for item in observed_artifacts):
                                 observed_artifacts.append(path)
                     if artifact_watch_started is not None and now - artifact_watch_started >= artifact_watchdog:
                         candidate_artifacts = observed_artifacts or self._ralph_materialized_artifacts(artifact_paths)
-                        verification_passed = await self._ralph_verification_passed(
+                        verification_passed, prep_evidence = await self._ralph_prepare_and_recheck_verification(
                             project_dir=project_dir,
                             story=story,
                         )
@@ -4955,6 +5703,12 @@ policy: {policy}
                                 project_dir=project_dir,
                                 story=story,
                             )
+                            if prep_evidence:
+                                verification_evidence = (
+                                    f"{prep_evidence}\n\n{verification_evidence}".strip()
+                                    if verification_evidence
+                                    else prep_evidence
+                                )
                         if (
                             self._ralph_can_supervisor_autofinalize(
                                 story,
@@ -4973,11 +5727,18 @@ policy: {policy}
                             )
                         ):
                             auto_finalized = True
+                            verification_failure_streak = 0
                             with contextlib.suppress(Exception):
                                 await stdio._client.cancel(session_id)
                             await self._ralph_cancel_prompt_task(prompt_task)
                             break
                         if candidate_artifacts and verification_evidence:
+                            verification_failure_streak += 1
+                            if verification_failure_streak < 2:
+                                artifact_watch_started = now
+                                observed_artifacts = candidate_artifacts
+                                artifact_snapshot = self._ralph_snapshot_artifacts(artifact_paths)
+                                continue
                             prompt_cancel_reason = "Supervisor verification failed"
                             verification_failure_cancelled = True
                             logger.info(
@@ -4988,6 +5749,7 @@ policy: {policy}
                                 await stdio._client.cancel(session_id)
                             await self._ralph_cancel_prompt_task(prompt_task)
                             break
+                        verification_failure_streak = 0
                         artifact_watch_started = now
                         observed_artifacts = candidate_artifacts
                     artifact_snapshot = self._ralph_snapshot_artifacts(artifact_paths)
@@ -5402,8 +6164,10 @@ policy: {policy}
                 resolved = self._ralph_resolve_project_dir(project_dir)
                 if resolved.suffix and not resolved.is_dir():
                     resolved = resolved.parent
-                resolved.mkdir(parents=True, exist_ok=True)
+                archived_project_dir = self._ralph_archive_existing_project_dir(resolved)
                 state["project_dir"] = str(resolved)
+                if archived_project_dir is not None:
+                    state["archived_project_dir"] = str(archived_project_dir)
             except Exception:
                 state["project_dir"] = str(project_dir)
         self._ralph_save_state(run_dir, state)
@@ -6009,6 +6773,7 @@ policy: {policy}
                     )
                     self._ralph_active_sessions[chat_id] = session_id
                     verification_failure_cancelled = False
+                    verification_failure_streak = 0
                     prompt = self._ralph_build_subagent_prompt(
                         run_dir=run_dir,
                         project_dir=project_dir,
@@ -6053,6 +6818,7 @@ policy: {policy}
                             observed_activity = True
                             last_activity = now
                             artifact_watch_started = now
+                            verification_failure_streak = 0
                             activity_snapshot = self._ralph_snapshot_artifacts(activity_paths)
                         activity_changed = self._ralph_changed_artifacts(
                             activity_paths,
@@ -6063,6 +6829,7 @@ policy: {policy}
                             observed_activity = True
                             last_activity = now
                             artifact_watch_started = now
+                            verification_failure_streak = 0
                             activity_snapshot = self._ralph_snapshot_artifacts(activity_paths)
                         changed_artifacts = self._ralph_changed_artifacts(
                             artifact_paths,
@@ -6072,6 +6839,7 @@ policy: {policy}
                         if changed_artifacts:
                             observed_activity = True
                             artifact_watch_started = now
+                            verification_failure_streak = 0
                             for path in changed_artifacts:
                                 if not any(str(path) == str(item) for item in observed_artifacts):
                                     observed_artifacts.append(path)
@@ -6082,7 +6850,7 @@ policy: {policy}
                             if self._ralph_pick_role(current_story) in {"researcher", "writer"}:
                                 should_autofinalize = bool(candidate_artifacts)
                             else:
-                                verification_passed = await self._ralph_verification_passed(
+                                verification_passed, prep_evidence = await self._ralph_prepare_and_recheck_verification(
                                     project_dir=project_dir,
                                     story=current_story,
                                 )
@@ -6097,6 +6865,12 @@ policy: {policy}
                                         project_dir=project_dir,
                                         story=current_story,
                                     )
+                                    if prep_evidence:
+                                        verification_evidence = (
+                                            f"{prep_evidence}\n\n{verification_evidence}".strip()
+                                            if verification_evidence
+                                            else prep_evidence
+                                        )
                             if should_autofinalize and self._ralph_autofinalize_story_from_artifacts(
                                 prd_path=prd_path,
                                 progress_path=progress_path,
@@ -6104,6 +6878,7 @@ policy: {policy}
                                 artifact_paths=candidate_artifacts,
                             ):
                                 auto_finalized = True
+                                verification_failure_streak = 0
                                 try:
                                     await stdio._client.cancel(session_id)
                                 except Exception:
@@ -6111,6 +6886,12 @@ policy: {policy}
                                 await self._ralph_cancel_prompt_task(prompt_task)
                                 break
                             if candidate_artifacts and verification_evidence:
+                                verification_failure_streak += 1
+                                if verification_failure_streak < 2:
+                                    artifact_watch_started = now
+                                    observed_artifacts = candidate_artifacts
+                                    artifact_snapshot = self._ralph_snapshot_artifacts(artifact_paths)
+                                    continue
                                 prompt_cancel_reason = "Supervisor verification failed"
                                 verification_failure_cancelled = True
                                 logger.info(
@@ -6124,6 +6905,7 @@ policy: {policy}
                                     pass
                                 await self._ralph_cancel_prompt_task(prompt_task)
                                 break
+                            verification_failure_streak = 0
                             artifact_watch_started = now
                             observed_artifacts = candidate_artifacts
                         artifact_snapshot = self._ralph_snapshot_artifacts(artifact_paths)

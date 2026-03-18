@@ -1,6 +1,6 @@
 """iflow-bot - Multi-channel AI Assistant powered by iflow CLI."""
 
-__version__ = "0.4.5"
+__version__ = "0.4.6"
 __logo__ = "🤖"
 
 from iflow_bot.engine.adapter import IFlowAdapter

@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## v0.4.6 - 2026-03-18
+
+- fix(stdio): Bound gateway ACP prewarm with an explicit timeout so startup no longer hangs indefinitely when stdio adapter warmup stalls.
+- fix(ralph): Treat static-frontend stories more precisely during acceptance synthesis and autofinalize checks, including dynamic JavaScript checkbox controls and localStorage persistence flows.
+- feat(ralph): Normalize canonical todo PRDs for storage mode, markdown tail content, and backup existing project directories before regenerating fresh output.
+- test(recovery): Add regression coverage for gateway startup ordering, stdio timeout retry paths, Ralph PRD delivery, and expanded runtime guard scenarios.
+- release: Publish 0.4.6 with verified Feishu end-to-end evidence covering `/new`, full Ralph flow, watchdog recovery, 500+ real-message load, and compression robustness.
+
 ## v0.4.5 - 2026-03-16
 
 - fix(ralph): Seed a minimal FastAPI route test during Ralph verification prep so fresh API scaffolds no longer fall into recovery only because `pytest` collected zero tests.
